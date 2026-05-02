@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+out/**
+src/**
+tsconfig.json
+webpack.config.js
+package-lock.json
+vsc-extension-quickstart.md
+.gitignore
+.ai-memory-db/**

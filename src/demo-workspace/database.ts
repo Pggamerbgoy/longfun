@@ -1,0 +1,1 @@
+export class Database { connect() { console.log("DB Connected"); } }

@@ -1,0 +1,2986 @@
+# AI MEMORY OS - SOURCE CODE EXPORT
+
+This file contains the core logic of AI Memory OS for review.
+
+
+
+======================================================
+FILE: src/ai/AnswerProvider.ts
+======================================================
+
+export interface AnswerContextChunk {
+    filePath: string;
+    content: string;
+    lineStart: number;
+    lineEnd: number;
+    type: string;
+}
+
+export interface AnswerContext {
+    query: string;
+    chunks: AnswerContextChunk[];
+    projectMapContext?: string;
+    graphContext: string;
+    optimizedPrompt: string;
+}
+
+export interface AnswerProvider {
+    readonly name: string;
+    isConfigured(): Promise<boolean>;
+    answer(context: AnswerContext): Promise<string>;
+}
+
+export class AnswerProviderNotConfiguredError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'AnswerProviderNotConfiguredError';
+    }
+}
+
+
+======================================================
+FILE: src/ai/EmbeddingProvider.ts
+======================================================
+
+export type EmbeddingTaskType = 'RETRIEVAL_DOCUMENT' | 'RETRIEVAL_QUERY' | 'SEMANTIC_SIMILARITY';
+
+export interface EmbeddingOptions {
+    taskType?: EmbeddingTaskType;
+    title?: string;
+}
+
+export interface EmbeddingProvider {
+    readonly name: string;
+    readonly dimensions: number;
+    embed(text: string, options?: EmbeddingOptions): Promise<number[]>;
+    getActiveProviderName?(): Promise<string>;
+}
+
+export class EmbeddingNotConfiguredError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'EmbeddingNotConfiguredError';
+    }
+}
+
+export function normalizeVector(values: number[], dimensions: number): number[] {
+    const vector = values.slice(0, dimensions);
+
+    while (vector.length < dimensions) {
+        vector.push(0);
+    }
+
+    const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+    if (magnitude === 0) {
+        return vector;
+    }
+
+    return vector.map(value => value / magnitude);
+}
+
+
+======================================================
+FILE: src/ai/GeminiAnswerProvider.ts
+======================================================
+
+import { GoogleGenAI } from '@google/genai';
+import { AnswerContext, AnswerProvider, AnswerProviderNotConfiguredError } from './AnswerProvider';
+
+type SecretReader = () => Promise<string | undefined>;
+type SettingReader<T> = () => T;
+
+export class GeminiAnswerProvider implements AnswerProvider {
+    readonly name = 'gemini';
+    private client: GoogleGenAI | null = null;
+    private clientKey: string | null = null;
+
+    constructor(
+        private readonly getApiKey: SecretReader,
+        private readonly getModel: SettingReader<string>
+    ) {}
+
+    async isConfigured(): Promise<boolean> {
+        const key = await this.getApiKey();
+        return Boolean(key && key.trim().length > 0);
+    }
+
+    async answer(context: AnswerContext): Promise<string> {
+        const apiKey = await this.getApiKey();
+        if (!apiKey) {
+            throw new AnswerProviderNotConfiguredError('Gemini API key is not configured.');
+        }
+
+        const response = await this.getClient(apiKey).models.generateContent({
+            model: this.getModel(),
+            contents: this.buildPrompt(context)
+        });
+
+        return response.text?.trim() || 'Gemini returned an empty answer.';
+    }
+
+    private getClient(apiKey: string): GoogleGenAI {
+        if (!this.client || this.clientKey !== apiKey) {
+            this.client = new GoogleGenAI({ apiKey });
+            this.clientKey = apiKey;
+        }
+        return this.client;
+    }
+
+    private buildPrompt(context: AnswerContext): string {
+        return [
+            'You are AI Memory OS, a local codebase memory assistant inside VS Code.',
+            'Answer the user using only the grounded code context below.',
+            'Cite files and line ranges when you make claims.',
+            'If the context is insufficient, say what is missing instead of guessing.',
+            '',
+            `User question: ${context.query}`,
+            '',
+            context.projectMapContext ? `COMPACT PROJECT MAP:\n${context.projectMapContext}\n` : '',
+            context.optimizedPrompt,
+            context.graphContext ? `\nDEPENDENCY / IMPACT CONTEXT:\n${context.graphContext}` : ''
+        ].join('\n');
+    }
+}
+
+
+======================================================
+FILE: src/ai/GeminiEmbeddingProvider.ts
+======================================================
+
+import { GoogleGenAI } from '@google/genai';
+import { EmbeddingNotConfiguredError, EmbeddingOptions, EmbeddingProvider, normalizeVector } from './EmbeddingProvider';
+
+type SecretReader = () => Promise<string | undefined>;
+type SettingReader<T> = () => T;
+
+export class GeminiEmbeddingProvider implements EmbeddingProvider {
+    readonly name = 'gemini-embedding-001';
+    private client: GoogleGenAI | null = null;
+    private clientKey: string | null = null;
+
+    constructor(
+        private readonly getApiKey: SecretReader,
+        private readonly getModel: SettingReader<string>,
+        private readonly getDimensions: SettingReader<number>
+    ) {}
+
+    get dimensions(): number {
+        return this.getDimensions();
+    }
+
+    async isConfigured(): Promise<boolean> {
+        const key = await this.getApiKey();
+        return Boolean(key && key.trim().length > 0);
+    }
+
+    async embed(text: string, options: EmbeddingOptions = {}): Promise<number[]> {
+        const apiKey = await this.getApiKey();
+        if (!apiKey) {
+            throw new EmbeddingNotConfiguredError('Gemini API key is not configured.');
+        }
+
+        const response = await this.getClient(apiKey).models.embedContent({
+            model: this.getModel(),
+            contents: this.trimForEmbedding(text),
+            config: {
+                outputDimensionality: this.dimensions,
+                taskType: options.taskType,
+                title: options.title
+            }
+        });
+
+        const values = response.embeddings?.[0]?.values;
+        if (!values || values.length === 0) {
+            throw new Error('Gemini returned an empty embedding.');
+        }
+
+        return normalizeVector(values, this.dimensions);
+    }
+
+    private getClient(apiKey: string): GoogleGenAI {
+        if (!this.client || this.clientKey !== apiKey) {
+            this.client = new GoogleGenAI({ apiKey });
+            this.clientKey = apiKey;
+        }
+        return this.client;
+    }
+
+    private trimForEmbedding(text: string): string {
+        const maxChars = 8000;
+        return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }
+}
+
+
+======================================================
+FILE: src/ai/HybridEmbeddingProvider.ts
+======================================================
+
+import { EmbeddingOptions, EmbeddingProvider } from './EmbeddingProvider';
+
+export class HybridEmbeddingProvider implements EmbeddingProvider {
+    readonly name = 'hybrid-local-semantic';
+    private activeProviderName: string | null = null;
+    private warnedFallback = false;
+
+    constructor(
+        private readonly primary: EmbeddingProvider,
+        private readonly fallback: EmbeddingProvider
+    ) {}
+
+    get dimensions(): number {
+        return this.primary.dimensions;
+    }
+
+    async embed(text: string, options?: EmbeddingOptions): Promise<number[]> {
+        try {
+            const vector = await this.primary.embed(text, options);
+            this.activeProviderName = this.primary.name;
+            return vector;
+        } catch (error) {
+            if (!this.warnedFallback) {
+                const message = error instanceof Error ? error.message : String(error);
+                console.warn(`AI Memory semantic embeddings unavailable, using keyword fallback: ${message}`);
+                this.warnedFallback = true;
+            }
+            this.activeProviderName = this.fallback.name;
+            return this.fallback.embed(text, options);
+        }
+    }
+
+    async getActiveProviderName(): Promise<string> {
+        return this.activeProviderName ?? this.primary.name;
+    }
+}
+
+
+======================================================
+FILE: src/ai/LocalGroundedAnswerProvider.ts
+======================================================
+
+import * as path from 'path';
+import { AnswerContext, AnswerProvider } from './AnswerProvider';
+
+export class LocalGroundedAnswerProvider implements AnswerProvider {
+    readonly name = 'local-grounded-summary';
+
+    async isConfigured(): Promise<boolean> {
+        return true;
+    }
+
+    async answer(context: AnswerContext): Promise<string> {
+        if (context.chunks.length === 0) {
+            return [
+                `I could not find indexed code for "${context.query}".`,
+                '',
+                'Try running AI Memory: Reindex Workspace, then ask again.'
+            ].join('\n');
+        }
+
+        const lines: string[] = [
+            `Grounded local answer for "${context.query}"`,
+        ];
+
+        if (context.projectMapContext) {
+            lines.push('');
+            lines.push(context.projectMapContext);
+        }
+
+        lines.push('');
+        lines.push('I found these relevant code areas:');
+
+        context.chunks.forEach((chunk, index) => {
+            const fileName = path.basename(chunk.filePath);
+            const preview = chunk.content.replace(/\s+/g, ' ').trim().slice(0, 220);
+            lines.push('');
+            lines.push(`${index + 1}. ${fileName}:${chunk.lineStart}-${chunk.lineEnd}`);
+            lines.push(`   ${preview}${chunk.content.length > 220 ? '...' : ''}`);
+        });
+
+        if (context.graphContext) {
+            lines.push('');
+            lines.push('Dependency context:');
+            lines.push(context.graphContext);
+        }
+
+        lines.push('');
+        lines.push('Prompt/context that would be sent to Gemini:');
+        lines.push('```');
+        lines.push(context.optimizedPrompt);
+        lines.push('```');
+
+        return lines.join('\n');
+    }
+}
+
+
+======================================================
+FILE: src/ai/LocalKeywordEmbeddingProvider.ts
+======================================================
+
+import { EmbeddingOptions, EmbeddingProvider, normalizeVector } from './EmbeddingProvider';
+
+export class LocalKeywordEmbeddingProvider implements EmbeddingProvider {
+    readonly name = 'local-keyword-768';
+    readonly dimensions: number;
+    private readonly stopWords = new Set([
+        'a', 'an', 'and', 'are', 'as', 'at', 'codebase', 'does', 'for', 'from',
+        'handle', 'how', 'in', 'is', 'it', 'makima', 'of', 'on', 'or', 'project',
+        'the', 'this', 'to', 'with'
+    ]);
+
+    constructor(dimensions: number = 768) {
+        this.dimensions = dimensions;
+    }
+
+    async embed(text: string, _options?: EmbeddingOptions): Promise<number[]> {
+        const vector = new Array(this.dimensions).fill(0);
+        const tokens = this.tokenize(text);
+
+        for (const token of tokens) {
+            const hash = this.hash(token);
+            const index = Math.abs(hash) % this.dimensions;
+            const sign = hash % 2 === 0 ? 1 : -1;
+            vector[index] += sign * this.weight(token);
+        }
+
+        return normalizeVector(vector, this.dimensions);
+    }
+
+    private tokenize(text: string): string[] {
+        const normalized = text
+            .replace(/([a-z])([A-Z])/g, '$1 $2')
+            .replace(/[_-]/g, ' ')
+            .toLowerCase();
+
+        const tokens: string[] = normalized.match(/[a-z0-9]+/g) ?? [];
+
+        if (normalized.includes('speech to text') || normalized.includes('voice input')) {
+            tokens.push('stt', 'transcription');
+        }
+        if (normalized.includes('text to speech') || normalized.includes('voice output')) {
+            tokens.push('tts', 'synthesis');
+        }
+
+        return tokens.filter(token => !this.stopWords.has(token));
+    }
+
+    private weight(token: string): number {
+        if (token.length <= 2) {
+            return 0.25;
+        }
+        if (token.length <= 5) {
+            return 0.75;
+        }
+        return 1;
+    }
+
+    private hash(value: string): number {
+        let hash = 2166136261;
+        for (let i = 0; i < value.length; i++) {
+            hash ^= value.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return hash | 0;
+    }
+}
+
+
+======================================================
+FILE: src/ai/TransformersEmbeddingProvider.ts
+======================================================
+
+import * as fs from 'fs';
+import { EmbeddingOptions, EmbeddingProvider, normalizeVector } from './EmbeddingProvider';
+
+type PipelineFactory = (task: string, model: string) => Promise<FeatureExtractionPipeline>;
+type FeatureExtractionPipeline = (input: string, options: Record<string, unknown>) => Promise<TensorLike>;
+
+interface TensorLike {
+    data?: Iterable<number>;
+    dims?: number[];
+    tolist?: () => unknown;
+}
+
+const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<any>;
+
+export class TransformersEmbeddingProvider implements EmbeddingProvider {
+    constructor(
+        private readonly getModel: () => string = () => 'Xenova/all-MiniLM-L6-v2',
+        private readonly getDimensions: () => number = () => 384,
+        private readonly getCacheDir?: () => string | undefined
+    ) {}
+
+    get name(): string {
+        return `transformers:${this.getModel()}`;
+    }
+
+    get dimensions(): number {
+        return this.getDimensions();
+    }
+
+    private extractorPromise: Promise<FeatureExtractionPipeline> | null = null;
+
+    async embed(text: string, _options: EmbeddingOptions = {}): Promise<number[]> {
+        const extractor = await this.getExtractor();
+        const output = await extractor(this.trimForEmbedding(text), {
+            pooling: 'mean',
+            normalize: true
+        });
+
+        return normalizeVector(this.tensorToVector(output), this.dimensions);
+    }
+
+    private async getExtractor(): Promise<FeatureExtractionPipeline> {
+        if (!this.extractorPromise) {
+            this.extractorPromise = this.loadExtractor();
+        }
+
+        return this.extractorPromise;
+    }
+
+    private async loadExtractor(): Promise<FeatureExtractionPipeline> {
+        const transformers = await dynamicImport('@huggingface/transformers');
+        const cacheDir = this.getCacheDir?.();
+
+        if (cacheDir) {
+            fs.mkdirSync(cacheDir, { recursive: true });
+            transformers.env.cacheDir = cacheDir;
+        }
+
+        const pipeline = transformers.pipeline as PipelineFactory;
+        return pipeline('feature-extraction', this.getModel());
+    }
+
+    private tensorToVector(output: TensorLike): number[] {
+        if (output.tolist) {
+            const list = output.tolist();
+            if (Array.isArray(list)) {
+                return this.flattenFirstVector(list);
+            }
+        }
+
+        if (output.data) {
+            return Array.from(output.data).slice(0, this.dimensions);
+        }
+
+        throw new Error('Transformers.js returned an embedding without tensor data.');
+    }
+
+    private flattenFirstVector(value: unknown): number[] {
+        if (!Array.isArray(value)) {
+            return [];
+        }
+
+        if (value.every(item => typeof item === 'number')) {
+            return value as number[];
+        }
+
+        return this.flattenFirstVector(value[0]);
+    }
+
+    private trimForEmbedding(text: string): string {
+        const maxChars = 8000;
+        return text.length > maxChars ? text.slice(0, maxChars) : text;
+    }
+}
+
+
+======================================================
+FILE: src/brain/BrainManager.ts
+======================================================
+
+import { VectorStore } from '../memory/VectorStore';
+import { ASTManager } from '../graph/ASTManager';
+import { CacheManager } from '../memory/CacheManager';
+import { AnswerContext, AnswerContextChunk, AnswerProvider } from '../ai/AnswerProvider';
+import { LocalGroundedAnswerProvider } from '../ai/LocalGroundedAnswerProvider';
+import { ProjectMapService } from '../project/ProjectMapService';
+
+export class BrainManager {
+    private vectorStore: VectorStore;
+    private astManager: ASTManager;
+    private cacheManager: CacheManager;
+    private answerProvider: AnswerProvider;
+    private localAnswerProvider = new LocalGroundedAnswerProvider();
+    private projectMapService: ProjectMapService;
+
+    constructor(vectorStore: VectorStore, astManager: ASTManager, answerProvider: AnswerProvider) {
+        this.vectorStore = vectorStore;
+        this.astManager = astManager;
+        this.answerProvider = answerProvider;
+        this.cacheManager = new CacheManager(150000); // Default to 150k budget
+        this.projectMapService = new ProjectMapService(astManager.getWorkspaceRoot(), astManager);
+    }
+
+    async ask(query: string): Promise<string> {
+        console.log(`Brain is thinking about: "${query}"...`);
+
+        // 1. Retrieve Semantic Context (RAG)
+        const searchResults = await this.vectorStore.search(query, 8) as AnswerContextChunk[];
+        
+        // 2. Retrieve Graph Context (AST)
+        const graphContext = await this.buildGraphContext(query, searchResults);
+        const relevantMap = await this.projectMapService.buildRelevantMap(query, searchResults);
+        const projectMapContext = this.projectMapService.renderRelevantMap(relevantMap);
+
+        // 3. Optimize Context for Token Budget (The "Free Tier" Logic)
+        const optimizedPrompt = this.cacheManager.optimizeContext(searchResults, query, graphContext, projectMapContext);
+        
+        console.log(`Sending ${optimizedPrompt.length} chars of context to AI...`);
+
+        const context: AnswerContext = {
+            query,
+            chunks: searchResults,
+            projectMapContext,
+            graphContext,
+            optimizedPrompt
+        };
+
+        if (await this.answerProvider.isConfigured()) {
+            try {
+                return await this.answerProvider.answer(context);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                const localAnswer = await this.localAnswerProvider.answer(context);
+                return `${localAnswer}\n\nGemini answer failed: ${message}`;
+            }
+        }
+
+        return this.localAnswerProvider.answer(context);
+    }
+
+    private async buildGraphContext(query: string, results: AnswerContextChunk[]): Promise<string> {
+        const lines: string[] = [];
+        const seenFiles = new Set<string>();
+        const fileFocusMatches = this.astManager.findFilesInQuery(query, 3);
+
+        for (const filePath of fileFocusMatches) {
+            if (seenFiles.has(filePath)) continue;
+            seenFiles.add(filePath);
+
+            const impact = await this.astManager.getFileImpact(filePath);
+            const relativeFile = this.astManager.getRelativePath(impact.filePath);
+            const imports = impact.imports
+                .filter(file => file !== impact.filePath && this.astManager.isIndexedFile(file))
+                .map(file => this.astManager.getRelativePath(file));
+            const directDependents = impact.directDependents.map(file => this.astManager.getRelativePath(file));
+            const impactedFiles = impact.impactedFiles
+                .filter(file => file !== impact.filePath)
+                .map(file => this.astManager.getRelativePath(file));
+
+            lines.push(`File impact focus: ${relativeFile}`);
+            lines.push(`- Imports/depends on: ${imports.length > 0 ? imports.slice(0, 8).join(', ') : 'none detected in indexed graph'}`);
+            lines.push(`- Directly used by: ${directDependents.length > 0 ? directDependents.slice(0, 8).join(', ') : 'none detected in indexed graph'}`);
+            lines.push(`- Changing this may affect ${impactedFiles.length} indexed file(s): ${impactedFiles.length > 0 ? impactedFiles.slice(0, 12).join(', ') : 'none detected'}`);
+            lines.push(`- Suggested checks: inspect this file's public functions/classes, review direct users, then run nearby tests/scripts that mention ${relativeFile.split('/').pop()}.`);
+            lines.push('');
+        }
+
+        for (const result of results.slice(0, 3)) {
+            if (seenFiles.has(result.filePath)) continue;
+            seenFiles.add(result.filePath);
+
+            const affected = await this.astManager.analyzeImpact(result.filePath);
+            if (affected.length > 1) {
+                const relativeFile = this.astManager.getRelativePath(result.filePath);
+                lines.push(`${relativeFile} affects ${affected.length - 1} indexed file(s):`);
+                affected.slice(1, 8).forEach(file => lines.push(`- ${this.astManager.getRelativePath(file)}`));
+            }
+        }
+
+        return lines.join('\n');
+    }
+}
+
+
+======================================================
+FILE: src/cli.ts
+======================================================
+
+import { ASTManager } from './graph/ASTManager';
+import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import * as path from 'path';
+
+async function main() {
+    const query = process.argv[2];
+    if (!query) {
+        console.error('Usage: ai-memory-search <query>');
+        process.exit(1);
+    }
+
+    // Initialize with current directory or project root
+    const root = process.cwd();
+    const ast = new ASTManager(root);
+    const vector = new VectorStore(root, new LocalKeywordEmbeddingProvider());
+
+    try {
+        await ast.init();
+        await vector.init();
+
+        const results = await vector.search(query, 3);
+        
+        const output = {
+            query: query,
+            results: await Promise.all(results.map(async (r: any) => {
+                const impact = await ast.analyzeImpact(r.filePath);
+                return {
+                    file: path.relative(root, r.filePath),
+                    lines: `${r.lineStart}-${r.lineEnd}`,
+                    content: r.content,
+                    affectedFiles: impact.map(f => path.relative(root, f))
+                };
+            }))
+        };
+
+        // Output as JSON so the Agent (Antigravity) can parse it perfectly
+        console.log(JSON.stringify(output, null, 2));
+
+    } catch (error) {
+        console.error('AI Memory Search Error:', error);
+        process.exit(1);
+    }
+}
+
+main();
+
+
+======================================================
+FILE: src/demo-workspace/authController.ts
+======================================================
+
+import { UserService } from "./userService";
+import { Database } from "./database";
+export class AuthController { login() { const db = new Database(); const s = new UserService(db); return s.getUser(); } }
+
+======================================================
+FILE: src/demo-workspace/database.ts
+======================================================
+
+export class Database { connect() { console.log("DB Connected"); } }
+
+======================================================
+FILE: src/demo-workspace/userService.ts
+======================================================
+
+import { Database } from "./database";
+export class UserService { constructor(private db: Database) {} getUser() { return "User A"; } }
+
+======================================================
+FILE: src/demo_full.ts
+======================================================
+
+import { ASTManager } from './graph/ASTManager';
+import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import * as path from 'path';
+import * as fs from 'fs';
+
+async function runFullDemo() {
+    console.log('🚀 --- AI Memory OS: Full Integration Demo --- 🚀');
+    
+    const demoDir = path.join(__dirname, 'demo-workspace');
+    if (!fs.existsSync(demoDir)) fs.mkdirSync(demoDir);
+
+    const ast = new ASTManager(demoDir);
+    const vector = new VectorStore(demoDir, new LocalKeywordEmbeddingProvider());
+
+    console.log('Step 1: Initializing Systems...');
+    await ast.init();
+    await vector.init();
+
+    console.log('\nStep 2: Indexing Project...');
+    const files = [
+        {
+            name: 'database.ts',
+            content: 'export class Database { connect() { console.log("DB Connected"); } }'
+        },
+        {
+            name: 'userService.ts',
+            content: 'import { Database } from "./database";\nexport class UserService { constructor(private db: Database) {} getUser() { return "User A"; } }'
+        },
+        {
+            name: 'authController.ts',
+            content: 'import { UserService } from "./userService";\nexport class AuthController { login() { const s = new UserService(); return s.getUser(); } }'
+        }
+    ];
+
+    for (const file of files) {
+        const filePath = path.join(demoDir, file.name);
+        fs.writeFileSync(filePath, file.content);
+        await ast.parseFile(filePath, file.content);
+        await vector.upsert(filePath, [{
+            filePath,
+            content: file.content,
+            metadata: { lineStart: 1, lineEnd: 1, type: 'file' }
+        }]);
+        console.log(`Indexed ${file.name}`);
+    }
+
+    console.log('\nStep 3: Simulating a change in database.ts...');
+    const targetFile = path.join(demoDir, 'database.ts');
+    const affected = await ast.analyzeImpact(targetFile);
+    
+    console.log('--- IMPACT ANALYSIS ---');
+    console.log(`If you modify "database.ts", the following files are affected:`);
+    affected.forEach(f => console.log(` - ${path.basename(f)}`));
+
+    console.log('\nStep 4: AI Context Retrieval (RAG)...');
+    console.log('AI Query: "How does the user service interact with the database?"');
+    const searchResults = await vector.search('user service database interaction', 2);
+    
+    console.log('--- RETRIEVED CONTEXT ---');
+    searchResults.forEach((r: any, i: number) => {
+        console.log(`[Result ${i+1}] ${path.basename(r.filePath)}: "${r.content.substring(0, 80)}..."`);
+    });
+
+    console.log('\n✅ Full Demo Completed Successfully!');
+}
+
+runFullDemo().catch(console.error);
+
+
+======================================================
+FILE: src/extension.ts
+======================================================
+
+import * as vscode from 'vscode';
+import * as path from 'path';
+import { ASTManager } from './graph/ASTManager';
+import { VectorStore } from './memory/VectorStore';
+import { ContinuousDiffEngine } from './mechanics/ContinuousDiffEngine';
+import { BrainManager } from './brain/BrainManager';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import { TransformersEmbeddingProvider } from './ai/TransformersEmbeddingProvider';
+import { HybridEmbeddingProvider } from './ai/HybridEmbeddingProvider';
+import { GeminiAnswerProvider } from './ai/GeminiAnswerProvider';
+import { WorkspaceIndexService } from './indexing/WorkspaceIndexService';
+import { ProjectMapService } from './project/ProjectMapService';
+
+const GEMINI_SECRET_KEY = 'aiMemory.geminiApiKey';
+
+export async function activate(context: vscode.ExtensionContext) {
+    console.log('AI Memory OS is now active!');
+
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0].uri.fsPath || context.globalStorageUri.fsPath;
+    const getConfig = () => vscode.workspace.getConfiguration('aiMemory');
+    const getGeminiModel = () => getConfig().get<string>('geminiModel', 'gemini-2.5-flash');
+    const getEmbeddingModel = () => getConfig().get<string>('embeddingModel', 'Xenova/all-MiniLM-L6-v2');
+    const getEmbeddingDimensions = () => getConfig().get<number>('embeddingDimensions', 384);
+    const getMaxFileSizeBytes = () => getConfig().get<number>('maxIndexedFileSizeKb', 512) * 1024;
+    const getTransformersCacheDir = () => path.join(context.globalStorageUri.fsPath, 'transformers-cache');
+    const getGeminiApiKey = async () => context.secrets.get(GEMINI_SECRET_KEY);
+
+    const astManager = new ASTManager(workspaceRoot);
+    await astManager.init();
+
+    const transformerEmbedding = new TransformersEmbeddingProvider(getEmbeddingModel, getEmbeddingDimensions, getTransformersCacheDir);
+    const localEmbedding = new LocalKeywordEmbeddingProvider(getEmbeddingDimensions());
+    const embeddingProvider = new HybridEmbeddingProvider(transformerEmbedding, localEmbedding);
+    const vectorStore = new VectorStore(workspaceRoot, embeddingProvider);
+    const geminiAnswerProvider = new GeminiAnswerProvider(getGeminiApiKey, getGeminiModel);
+    const brain = new BrainManager(vectorStore, astManager, geminiAnswerProvider);
+    const indexService = new WorkspaceIndexService(workspaceRoot, astManager, vectorStore, getMaxFileSizeBytes());
+    const projectMapService = new ProjectMapService(workspaceRoot, astManager);
+    const diffEngine = new ContinuousDiffEngine(indexService);
+
+    await vectorStore.init();
+    diffEngine.startWatching();
+
+    const runWorkspaceIndex = async (force: boolean, title: string) => {
+        return vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title,
+            cancellable: false
+        }, async (progress) => {
+            const status = await indexService.indexWorkspace({
+                force,
+                onProgress: (currentStatus, currentFile) => {
+                    const increment = currentStatus.totalFiles > 0 ? 100 / currentStatus.totalFiles : 0;
+                    const fileName = currentFile ? path.basename(currentFile) : '';
+                    progress.report({
+                        increment,
+                        message: `${currentStatus.indexedFiles}/${currentStatus.totalFiles} ${fileName}`
+                    });
+                }
+            });
+
+            vscode.window.setStatusBarMessage(
+                `$(database) AI Memory: indexed ${status.indexedFiles} files`,
+                4000
+            );
+            return status;
+        });
+    };
+
+    const startDisposable = vscode.commands.registerCommand('aiMemory.start', async () => {
+        await runWorkspaceIndex(false, 'AI Memory: Indexing workspace');
+        vscode.window.showInformationMessage('AI Memory OS Started: workspace memory is active.');
+    });
+
+    const reindexDisposable = vscode.commands.registerCommand('aiMemory.reindexWorkspace', async () => {
+        const status = await runWorkspaceIndex(true, 'AI Memory: Reindexing workspace');
+        vscode.window.showInformationMessage(`AI Memory reindexed ${status.indexedFiles} files.`);
+    });
+
+    const statusDisposable = vscode.commands.registerCommand('aiMemory.showIndexStatus', async () => {
+        const status = indexService.getStatus();
+        const chunkCount = await vectorStore.getChunkCount();
+        const provider = await vectorStore.getEmbeddingProviderName();
+        vscode.window.showInformationMessage(
+            `AI Memory: ${chunkCount} chunks, ${astManager.getFileCount()} graph files, provider: ${provider}, last index: ${status.lastIndexedAt || 'never'}`
+        );
+    });
+
+    const setGeminiKeyDisposable = vscode.commands.registerCommand('aiMemory.setGeminiApiKey', async () => {
+        const apiKey = await vscode.window.showInputBox({
+            prompt: 'Enter your Gemini API key',
+            password: true,
+            ignoreFocusOut: true
+        });
+        if (!apiKey) return;
+
+        await context.secrets.store(GEMINI_SECRET_KEY, apiKey.trim());
+        const action = await vscode.window.showInformationMessage(
+            'Gemini API key saved. AI Memory will use Gemini for answer synthesis and local embeddings for memory.',
+            'Ask a Question'
+        );
+
+        if (action === 'Ask a Question') {
+            await vscode.commands.executeCommand('aiMemory.ask');
+        }
+    });
+
+    const clearGeminiKeyDisposable = vscode.commands.registerCommand('aiMemory.clearGeminiApiKey', async () => {
+        await context.secrets.delete(GEMINI_SECRET_KEY);
+        vscode.window.showInformationMessage('Gemini API key cleared. AI Memory will keep answering from local grounded memory.');
+    });
+
+    const askDisposable = vscode.commands.registerCommand('aiMemory.ask', async () => {
+        const query = await vscode.window.showInputBox({ prompt: 'Ask a question about your codebase...' });
+        if (!query) return;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'AI Memory is thinking...',
+            cancellable: false
+        }, async () => {
+            const answer = await brain.ask(query);
+            const channel = vscode.window.createOutputChannel('AI Memory Answer');
+            channel.appendLine(answer);
+            channel.show();
+        });
+    });
+
+    const impactDisposable = vscode.commands.registerCommand('aiMemory.analyzeImpact', async () => {
+        const editor = vscode.window.activeTextEditor;
+        let targetFile = editor?.document.uri.fsPath;
+
+        if (!targetFile) {
+            const fileQuery = await vscode.window.showInputBox({
+                prompt: 'Enter a file name or path to analyze impact, for example core/stt_engine.py'
+            });
+            if (!fileQuery) return;
+
+            const matches = astManager.findFilesInQuery(fileQuery, 1);
+            targetFile = matches[0];
+        }
+
+        if (!targetFile) {
+            vscode.window.showErrorMessage('No indexed file matched that name. Run AI Memory: Reindex Workspace, then try again.');
+            return;
+        }
+        
+        const impact = await astManager.getFileImpact(targetFile);
+        const fileNames = impact.impactedFiles.map(f => astManager.getRelativePath(f)).join(', ');
+        vscode.window.showInformationMessage(`Impact Analysis: ${fileNames}`);
+    });
+
+    const projectMapDisposable = vscode.commands.registerCommand('aiMemory.showProjectMap', async () => {
+        const query = await vscode.window.showInputBox({
+            prompt: 'Optional: enter a file name or change goal for a focused project map',
+            placeHolder: 'core/stt_engine.py fallback change'
+        });
+        const channel = vscode.window.createOutputChannel('AI Memory Project Map');
+
+        if (query && query.trim().length > 0) {
+            const chunks = await vectorStore.search(query, 8);
+            const relevantMap = await projectMapService.buildRelevantMap(query, chunks);
+            channel.appendLine(projectMapService.renderRelevantMap(relevantMap));
+        } else {
+            channel.appendLine(projectMapService.renderWorkspaceMap(projectMapService.buildWorkspaceMap()));
+        }
+
+        channel.show();
+    });
+
+    const graphDisposable = vscode.commands.registerCommand('aiMemory.showGraph', () => {
+        const mermaidGraph = astManager.generateMermaidGraph();
+        if (mermaidGraph.trim() === 'graph TD') {
+            vscode.window.showInformationMessage('AI Memory graph is empty. Run AI Memory: Reindex Workspace first.');
+            return;
+        }
+
+        const panel = vscode.window.createWebviewPanel(
+            'aiMemoryGraph',
+            'Project Dependency Graph',
+            vscode.ViewColumn.One,
+            { enableScripts: true }
+        );
+        
+        panel.webview.html = `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+                <style>
+                    body { background: #0d0d1f; color: #e2e0ff; display: flex; flex-direction: column; align-items: center; padding: 20px; font-family: 'Inter', sans-serif; }
+                    .mermaid { background: #141430; padding: 20px; border-radius: 12px; border: 1px solid #1e1e45; box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+                    h2 { color: #a78bfa; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 0.1em; }
+                </style>
+            </head>
+            <body>
+                <h2>Project Dependency Graph</h2>
+                <div class="mermaid">
+                    ${mermaidGraph}
+                </div>
+                <script>
+                    mermaid.initialize({ 
+                        startOnLoad: true, 
+                        theme: 'dark',
+                        themeVariables: {
+                            primaryColor: '#a78bfa',
+                            primaryTextColor: '#fff',
+                            primaryBorderColor: '#7c3aed',
+                            lineColor: '#9895c0',
+                            secondaryColor: '#1e1e45',
+                            tertiaryColor: '#111128'
+                        }
+                    });
+                </script>
+            </body>
+            </html>
+        `;
+    });
+
+    context.subscriptions.push(
+        startDisposable,
+        reindexDisposable,
+        statusDisposable,
+        setGeminiKeyDisposable,
+        clearGeminiKeyDisposable,
+        askDisposable,
+        impactDisposable,
+        projectMapDisposable,
+        graphDisposable,
+        diffEngine
+    );
+
+    if (getConfig().get<boolean>('autoIndexOnStartup', true)) {
+        void (async () => {
+            try {
+                if (await vectorStore.getChunkCount() === 0) {
+                    await runWorkspaceIndex(true, 'AI Memory: Initial workspace index');
+                }
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                console.warn('AI Memory startup indexing failed:', message);
+                vscode.window.showWarningMessage(`AI Memory startup indexing failed: ${message}`);
+            }
+        })();
+    }
+
+    // Export API for other extensions (like Agent Guardrails Engine) to use
+    return {
+        getFileImpact: async (filePath: string) => {
+            return await astManager.getFileImpact(filePath);
+        },
+        getProjectMap: () => {
+            return projectMapService.buildWorkspaceMap();
+        },
+        generateMermaidGraph: () => {
+            return astManager.generateMermaidGraph();
+        },
+        askCritic: async (prompt: string) => {
+            return await brain.ask(prompt);
+        }
+    };
+}
+
+export function deactivate() {
+    console.log('AI Memory OS deactivated.');
+}
+
+
+======================================================
+FILE: src/graph/ASTManager.ts
+======================================================
+
+// import * as vscode from 'vscode';
+import * as path from 'path';
+import * as fs from 'fs';
+const Parser = require('web-tree-sitter');
+
+export interface FileImpactSummary {
+    filePath: string;
+    imports: string[];
+    directDependents: string[];
+    impactedFiles: string[];
+}
+
+export class ASTManager {
+    private parser: any = null;
+    private dependencyGraph: Map<string, string[]> = new Map();
+    private tsLanguage: any = null;
+    private jsLanguage: any = null;
+    private pythonLanguage: any = null;
+    private workspaceRoot: string;
+
+    constructor(workspaceRoot: string = process.cwd()) {
+        this.workspaceRoot = path.resolve(workspaceRoot);
+    }
+
+    setWorkspaceRoot(workspaceRoot: string) {
+        this.workspaceRoot = path.resolve(workspaceRoot);
+    }
+
+    getWorkspaceRoot(): string {
+        return this.workspaceRoot;
+    }
+
+    async init() {
+        await Parser.init({
+            locateFile: (scriptName: string) => this.resolveWasm(scriptName)
+        });
+        this.parser = new Parser();
+        
+        // Load WASM binaries (assuming they are next to the script or in src)
+        try {
+            this.tsLanguage = await Parser.Language.load(this.resolveWasm('tree-sitter-typescript.wasm'));
+            this.jsLanguage = await Parser.Language.load(this.resolveWasm('tree-sitter-javascript.wasm'));
+            this.pythonLanguage = await Parser.Language.load(this.resolveWasm('tree-sitter-python.wasm'));
+            console.log('ASTManager initialized with Web-Tree-sitter (WASM) for JS/TS/Python.');
+        } catch (err) {
+            console.error('Failed to load WASM languages:', err);
+        }
+    }
+
+    private setLanguage(ext: string) {
+        if (!this.parser) return;
+        
+        if (ext === '.ts' || ext === '.tsx') {
+            if (this.tsLanguage) this.parser.setLanguage(this.tsLanguage);
+        } else if (ext === '.js' || ext === '.jsx') {
+            if (this.jsLanguage) this.parser.setLanguage(this.jsLanguage);
+        } else if (ext === '.py') {
+            if (this.pythonLanguage) this.parser.setLanguage(this.pythonLanguage);
+        } else {
+            if (this.tsLanguage) this.parser.setLanguage(this.tsLanguage);
+        }
+    }
+
+    async parseFile(filePath: string, content: string): Promise<void> {
+        const normalizedFilePath = path.resolve(filePath);
+
+        if (!this.parser) {
+            console.warn('Parser not initialized, calling init()...');
+            await this.init();
+        }
+
+        try {
+            const ext = path.extname(normalizedFilePath);
+            this.setLanguage(ext);
+            
+            const tree = this.parser!.parse(content);
+            const imports = this.extractImports(tree.rootNode, ext)
+                .map(imp => this.resolveImport(normalizedFilePath, imp))
+                .filter(Boolean) as string[];
+            
+            this.dependencyGraph.set(normalizedFilePath, [...new Set(imports)]);
+            console.log(`Parsed ${path.basename(normalizedFilePath)}. Found ${imports.length} imports.`);
+        } catch (error) {
+            console.error(`Error parsing file ${normalizedFilePath}:`, error);
+        }
+    }
+
+    private extractImports(rootNode: any, ext: string): string[] {
+        const imports: string[] = [];
+        
+        const traverse = (node: any) => {
+            // JS/TS import extraction
+            if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx') {
+                if (node.type === 'import_statement') {
+                    for (const child of node.namedChildren) {
+                        if (child.type === 'string' || child.type === 'string_fragment') {
+                            imports.push(child.text.replace(/['"]/g, ''));
+                        }
+                    }
+                } else if (node.type === 'call_expression') {
+                    if (node.child(0)?.text === 'require' && node.child(1)?.type === 'arguments') {
+                        const arg = node.child(1)?.child(1);
+                        if (arg && arg.type === 'string') {
+                            imports.push(arg.text.replace(/['"]/g, ''));
+                        }
+                    }
+                }
+            } 
+            // Python import extraction
+            else if (ext === '.py') {
+                if (node.type === 'import_statement' || node.type === 'import_from_statement') {
+                    // In Python tree-sitter:
+                    // import_statement -> dotted_name
+                    // import_from_statement -> dotted_name
+                    for (const child of node.namedChildren) {
+                        if (child.type === 'dotted_name' || child.type === 'aliased_import' || child.type === 'relative_import') {
+                            imports.push(child.text);
+                        }
+                    }
+                }
+            }
+            
+            for (let i = 0; i < node.childCount; i++) {
+                const childNode = node.child(i);
+                if (childNode) traverse(childNode);
+            }
+        };
+
+        traverse(rootNode);
+        return [...new Set(imports)];
+    }
+
+    async analyzeImpact(filePath: string): Promise<string[]> {
+        const targetFile = path.resolve(filePath);
+        const affectedFiles = new Set<string>([targetFile]);
+        const queue = [targetFile];
+
+        while (queue.length > 0) {
+            const currentFile = queue.shift()!;
+
+            for (const [dependentFile, imports] of this.dependencyGraph.entries()) {
+                if (affectedFiles.has(dependentFile)) continue;
+
+                if (imports.includes(currentFile)) {
+                    affectedFiles.add(dependentFile);
+                    queue.push(dependentFile);
+                }
+            }
+        }
+
+        return [...affectedFiles];
+    }
+
+    async getFileImpact(filePath: string): Promise<FileImpactSummary> {
+        const targetFile = path.resolve(filePath);
+        return {
+            filePath: targetFile,
+            imports: this.getImportsForFile(targetFile),
+            directDependents: this.getDirectDependents(targetFile),
+            impactedFiles: await this.analyzeImpact(targetFile)
+        };
+    }
+
+    getImportsForFile(filePath: string): string[] {
+        return [...(this.dependencyGraph.get(path.resolve(filePath)) || [])];
+    }
+
+    getDirectDependents(filePath: string): string[] {
+        const targetFile = path.resolve(filePath);
+        return [...this.dependencyGraph.entries()]
+            .filter(([, imports]) => imports.includes(targetFile))
+            .map(([dependentFile]) => dependentFile);
+    }
+
+    findFilesInQuery(query: string, limit: number = 5): string[] {
+        const normalizedQuery = this.normalizeForSearch(query);
+        if (!normalizedQuery) return [];
+
+        const scored = [...this.dependencyGraph.keys()]
+            .map(filePath => ({
+                filePath,
+                score: this.scoreFileMatch(normalizedQuery, filePath)
+            }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                return path.relative(this.workspaceRoot, a.filePath).length - path.relative(this.workspaceRoot, b.filePath).length;
+            });
+
+        return scored.slice(0, limit).map(item => item.filePath);
+    }
+
+    deleteFile(filePath: string) {
+        const normalizedFilePath = path.resolve(filePath);
+        this.dependencyGraph.delete(normalizedFilePath);
+
+        for (const [dependentFile, imports] of this.dependencyGraph.entries()) {
+            this.dependencyGraph.set(
+                dependentFile,
+                imports.filter(imp => imp !== normalizedFilePath)
+            );
+        }
+    }
+
+    clear() {
+        this.dependencyGraph.clear();
+    }
+
+    getFileCount(): number {
+        return this.dependencyGraph.size;
+    }
+
+    getIndexedFiles(): string[] {
+        return [...this.dependencyGraph.keys()];
+    }
+
+    isIndexedFile(filePath: string): boolean {
+        return this.dependencyGraph.has(path.resolve(filePath));
+    }
+
+    getRelativePath(filePath: string): string {
+        return path.relative(this.workspaceRoot, path.resolve(filePath)).replace(/\\/g, '/');
+    }
+
+    generateMermaidGraph(): string {
+        let mermaid = 'graph TD\n';
+
+        for (const [file, imports] of this.dependencyGraph.entries()) {
+            const fileName = path.relative(this.workspaceRoot, file).replace(/\\/g, '/');
+            const fileId = fileName.replace(/[^a-zA-Z0-9]/g, '_');
+            
+            mermaid += `  ${fileId}["${fileName}"]\n`;
+            
+            for (const imp of imports) {
+                if (this.dependencyGraph.has(imp)) {
+                    const targetName = path.relative(this.workspaceRoot, imp).replace(/\\/g, '/');
+                    const targetId = targetName.replace(/[^a-zA-Z0-9]/g, '_');
+                    mermaid += `  ${fileId} --> ${targetId}\n`;
+                }
+            }
+        }
+        return mermaid;
+    }
+
+    private resolveImport(fromFile: string, importPath: string): string | null {
+        let basePath: string;
+
+        if (path.isAbsolute(importPath)) {
+            basePath = importPath;
+        } else if (importPath.startsWith('./') || importPath.startsWith('../')) {
+            basePath = path.resolve(path.dirname(fromFile), importPath);
+        } else if (importPath.startsWith('.')) {
+            const withoutLeadingDots = importPath.replace(/^\.+/, '').replace(/^[/\\]/, '');
+            basePath = path.resolve(path.dirname(fromFile), withoutLeadingDots);
+        } else {
+            basePath = path.join(this.workspaceRoot, importPath.replace(/\./g, path.sep));
+        }
+
+        const candidates = [
+            basePath,
+            `${basePath}.ts`,
+            `${basePath}.tsx`,
+            `${basePath}.js`,
+            `${basePath}.jsx`,
+            `${basePath}.py`,
+            path.join(basePath, 'index.ts'),
+            path.join(basePath, 'index.tsx'),
+            path.join(basePath, 'index.js'),
+            path.join(basePath, 'index.jsx'),
+            path.join(basePath, '__init__.py')
+        ];
+
+        for (const candidate of candidates) {
+            if (fs.existsSync(candidate)) {
+                return path.resolve(candidate);
+            }
+        }
+
+        return path.resolve(basePath);
+    }
+
+    private normalizeForSearch(value: string): string {
+        return value
+            .replace(/\\/g, '/')
+            .replace(/["'`]/g, '')
+            .toLowerCase()
+            .trim();
+    }
+
+    private scoreFileMatch(normalizedQuery: string, filePath: string): number {
+        const relativePath = this.getRelativePath(filePath).toLowerCase();
+        const baseName = path.basename(relativePath);
+        const stem = baseName.replace(/\.[^.]+$/, '');
+
+        if (normalizedQuery === relativePath) return 120;
+        if (normalizedQuery.includes(relativePath)) return 110;
+        if (normalizedQuery.endsWith(`/${relativePath}`)) return 105;
+        if (normalizedQuery === baseName) return 100;
+        if (normalizedQuery.includes(baseName)) return 90;
+        if (stem.length >= 4 && normalizedQuery === stem) return 80;
+        if (stem.length >= 4 && normalizedQuery.includes(stem)) return 70;
+
+        const compactRelative = relativePath.replace(/\.[^.]+$/, '');
+        if (normalizedQuery === compactRelative || normalizedQuery.includes(compactRelative)) return 75;
+
+        return 0;
+    }
+
+    private resolveWasm(wasmName: string): string {
+        const paths = [
+            path.join(__dirname, wasmName),
+            path.join(__dirname, '..', wasmName),
+            path.join(__dirname, '..', '..', 'src', wasmName),
+            path.join(__dirname, '..', '..', 'node_modules', 'web-tree-sitter', wasmName),
+            path.join(process.cwd(), 'dist', wasmName),
+            path.join(process.cwd(), 'src', wasmName),
+            path.join(process.cwd(), wasmName),
+            path.join(process.cwd(), 'node_modules', 'web-tree-sitter', wasmName)
+        ];
+
+        for (const candidate of paths) {
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
+        }
+
+        return wasmName;
+    }
+}
+
+
+======================================================
+FILE: src/indexing/WorkspaceIndexService.ts
+======================================================
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { ASTManager } from '../graph/ASTManager';
+import { CodeChunk, VectorStore } from '../memory/VectorStore';
+
+export interface IndexStatus {
+    isIndexing: boolean;
+    indexedFiles: number;
+    skippedFiles: number;
+    totalFiles: number;
+    lastIndexedAt?: string;
+    lastError?: string;
+    embeddingProvider?: string;
+}
+
+export interface WorkspaceIndexOptions {
+    force?: boolean;
+    onProgress?: (status: IndexStatus, currentFile?: string) => void;
+}
+
+export interface IndexFileOptions {
+    force?: boolean;
+}
+
+interface IndexedFileState {
+    mtimeMs: number;
+    size: number;
+}
+
+export class WorkspaceIndexService {
+    private readonly supportedExtensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.py']);
+    private readonly ignoredDirectories = new Set([
+        'node_modules',
+        '.git',
+        'dist',
+        'out',
+        'build',
+        '.ai-memory-db',
+        '.npm-cache',
+        '.vscode-test',
+        '.pytest_cache',
+        '.ruff_cache',
+        '.mypy_cache',
+        '.claude',
+        '.claude-flow',
+        '.swarm',
+        '.agent',
+        'logs',
+        'data',
+        'screenshots',
+        'tmp',
+        'whatsapp_session',
+        '__pycache__'
+    ]);
+    private status: IndexStatus = {
+        isIndexing: false,
+        indexedFiles: 0,
+        skippedFiles: 0,
+        totalFiles: 0
+    };
+    private indexedFileState = new Map<string, IndexedFileState>();
+
+    constructor(
+        private readonly workspaceRoot: string,
+        private readonly astManager: ASTManager,
+        private readonly vectorStore: VectorStore,
+        private readonly maxFileSizeBytes: number = 512 * 1024
+    ) {}
+
+    async indexWorkspace(options: WorkspaceIndexOptions = {}): Promise<IndexStatus> {
+        if (this.status.isIndexing) {
+            return this.getStatus();
+        }
+
+        this.status = {
+            isIndexing: true,
+            indexedFiles: 0,
+            skippedFiles: 0,
+            totalFiles: 0,
+            embeddingProvider: await this.vectorStore.getEmbeddingProviderName()
+        };
+
+        try {
+            const files = await this.collectFiles(this.workspaceRoot);
+            this.status.totalFiles = files.length;
+
+            if (options.force) {
+                this.astManager.clear();
+                await this.vectorStore.clear();
+                this.indexedFileState.clear();
+            }
+
+            await this.deleteMissingFiles(files);
+
+            for (const file of files) {
+                const indexed = await this.indexFile(file, { force: options.force });
+                if (indexed) {
+                    this.status.indexedFiles++;
+                } else {
+                    this.status.skippedFiles++;
+                }
+                options.onProgress?.(this.getStatus(), file);
+            }
+
+            this.status.isIndexing = false;
+            this.status.lastIndexedAt = new Date().toISOString();
+            this.status.embeddingProvider = await this.vectorStore.getEmbeddingProviderName();
+            return this.getStatus();
+        } catch (error) {
+            this.status.isIndexing = false;
+            this.status.lastError = error instanceof Error ? error.message : String(error);
+            throw error;
+        }
+    }
+
+    async indexFile(filePath: string, options: IndexFileOptions = {}): Promise<boolean> {
+        if (!this.shouldIndexFile(filePath)) {
+            return false;
+        }
+
+        const resolvedFilePath = path.resolve(filePath);
+        const stat = await fs.promises.stat(resolvedFilePath);
+        if (stat.size > this.maxFileSizeBytes) {
+            return false;
+        }
+
+        if (!options.force && !this.hasFileChanged(resolvedFilePath, stat)) {
+            return false;
+        }
+
+        const content = await fs.promises.readFile(resolvedFilePath, 'utf8');
+        await this.astManager.parseFile(resolvedFilePath, content);
+        await this.vectorStore.upsert(resolvedFilePath, this.chunkCode(resolvedFilePath, content));
+        this.indexedFileState.set(resolvedFilePath, {
+            mtimeMs: stat.mtimeMs,
+            size: stat.size
+        });
+        return true;
+    }
+
+    async deleteFile(filePath: string): Promise<void> {
+        const resolvedFilePath = path.resolve(filePath);
+        this.astManager.deleteFile(resolvedFilePath);
+        await this.vectorStore.deleteFile(resolvedFilePath);
+        this.indexedFileState.delete(resolvedFilePath);
+    }
+
+    getStatus(): IndexStatus {
+        return { ...this.status };
+    }
+
+    shouldIndexFile(filePath: string): boolean {
+        const resolved = path.resolve(filePath);
+        if (!resolved.startsWith(path.resolve(this.workspaceRoot))) {
+            return false;
+        }
+
+        if (!this.supportedExtensions.has(path.extname(resolved))) {
+            return false;
+        }
+
+        const relativeParts = path.relative(this.workspaceRoot, resolved).split(path.sep);
+        return !relativeParts.some(part => this.ignoredDirectories.has(part));
+    }
+
+    private hasFileChanged(filePath: string, stat: fs.Stats): boolean {
+        const previous = this.indexedFileState.get(filePath);
+        return !previous || previous.mtimeMs !== stat.mtimeMs || previous.size !== stat.size;
+    }
+
+    private async deleteMissingFiles(currentFiles: string[]): Promise<void> {
+        const current = new Set(currentFiles.map(file => path.resolve(file)));
+        for (const indexedFile of [...this.indexedFileState.keys()]) {
+            if (!current.has(indexedFile)) {
+                await this.deleteFile(indexedFile);
+            }
+        }
+    }
+
+    private async collectFiles(directory: string, files: string[] = []): Promise<string[]> {
+        let entries: fs.Dirent[];
+        try {
+            entries = await fs.promises.readdir(directory, { withFileTypes: true });
+        } catch (error) {
+            this.status.skippedFiles++;
+            console.warn(`AI Memory skipped unreadable directory ${directory}:`, error);
+            return files;
+        }
+
+        for (const entry of entries) {
+            const fullPath = path.join(directory, entry.name);
+
+            if (entry.isDirectory()) {
+                if (!this.ignoredDirectories.has(entry.name)) {
+                    await this.collectFiles(fullPath, files);
+                }
+            } else if (entry.isFile() && this.shouldIndexFile(fullPath)) {
+                files.push(fullPath);
+            }
+        }
+
+        return files;
+    }
+
+    private chunkCode(filePath: string, content: string): CodeChunk[] {
+        const lines = content.split('\n');
+        const chunks: CodeChunk[] = [];
+        const chunkSize = 80;
+
+        for (let i = 0; i < lines.length; i += chunkSize) {
+            const chunkLines = lines.slice(i, i + chunkSize);
+            const contentChunk = chunkLines.join('\n');
+            if (contentChunk.trim().length === 0) {
+                continue;
+            }
+
+            chunks.push({
+                filePath,
+                content: contentChunk,
+                metadata: {
+                    lineStart: i + 1,
+                    lineEnd: i + chunkLines.length,
+                    type: 'chunk'
+                }
+            });
+        }
+
+        return chunks;
+    }
+}
+
+
+======================================================
+FILE: src/index_all.ts
+======================================================
+
+import { ASTManager } from './graph/ASTManager';
+import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import * as path from 'path';
+import * as fs from 'fs';
+
+async function indexAll() {
+    console.log('🚀 --- Indexing Entire Makima Workspace --- 🚀');
+    
+    const workspaceRoot = 'c:\\code\\makima_fixed';
+    const extensionDir = 'C:\\Users\\kamit\\.gemini\\antigravity\\scratch\\ai-memory-extension';
+    
+    const ast = new ASTManager(workspaceRoot);
+    const vector = new VectorStore(extensionDir, new LocalKeywordEmbeddingProvider());
+
+    await ast.init();
+    await vector.init();
+
+    function getFiles(dir: string, fileList: string[] = []): string[] {
+        if (!fs.existsSync(dir)) return fileList;
+        const files = fs.readdirSync(dir);
+        files.forEach(file => {
+            const filePath = path.join(dir, file);
+            if (fs.statSync(filePath).isDirectory()) {
+                if (!['node_modules', '.git', '__pycache__', '.agent', 'dist', 'build', '.pytest_cache', 'makima_memory', 'logs', 'data', 'screenshots', 'whatsapp_session', 'tmp', 'scratch'].includes(file)) {
+                    getFiles(filePath, fileList);
+                }
+            } else if (file.endsWith('.py') || file.endsWith('.ts') || file.endsWith('.js')) {
+                fileList.push(filePath);
+            }
+        });
+        return fileList;
+    }
+
+    console.log('Scanning workspace...');
+    const allFiles = getFiles(workspaceRoot);
+    console.log(`Found ${allFiles.length} files to index.`);
+
+    for (let i = 0; i < allFiles.length; i++) {
+        const file = allFiles[i];
+        if (i % 20 === 0) console.log(`Progress: ${i}/${allFiles.length}...`);
+        
+        try {
+            const content = fs.readFileSync(file, 'utf-8');
+            await ast.parseFile(file, content);
+            
+            const lines = content.split('\n');
+            const chunks = [];
+            // Chunk every 50 lines for better granularity
+            for (let j = 0; j < lines.length; j += 50) {
+                chunks.push({
+                    filePath: file,
+                    content: lines.slice(j, j + 50).join('\n'),
+                    metadata: { lineStart: j + 1, lineEnd: j + 50, type: 'chunk' }
+                });
+            }
+            await vector.upsert(file, chunks);
+        } catch (e) {
+            console.error(`Error indexing ${file}:`, e);
+        }
+    }
+
+    console.log('\n✅ Workspace Memory Updated!');
+}
+
+indexAll().catch(console.error);
+
+
+======================================================
+FILE: src/mcp/AiMemoryMcpTools.ts
+======================================================
+
+import * as path from 'path';
+import { BrainManager } from '../brain/BrainManager';
+import { ASTManager } from '../graph/ASTManager';
+import { VectorStore } from '../memory/VectorStore';
+import { ProjectMapService } from '../project/ProjectMapService';
+
+export class AiMemoryMcpTools {
+    constructor(
+        private readonly workspaceRoot: string,
+        private readonly astManager: ASTManager,
+        private readonly vectorStore: VectorStore,
+        private readonly brain: BrainManager,
+        private readonly projectMapService: ProjectMapService
+    ) {}
+
+    async statusText(maxTokens: number = 800): Promise<string> {
+        return this.toBoundedJson({
+            summary: 'AI Memory workspace status',
+            workspace: this.workspaceRoot,
+            chunks: await this.vectorStore.getChunkCount(),
+            graphFiles: this.astManager.getFileCount(),
+            embeddingProvider: await this.vectorStore.getEmbeddingProviderName()
+        }, maxTokens);
+    }
+
+    async projectMapText(query?: string, maxTokens: number = 1200): Promise<string> {
+        if (query && query.trim().length > 0) {
+            const chunks = await this.vectorStore.search(query, 8);
+            const map = await this.projectMapService.buildRelevantMap(query, chunks);
+            return this.toBoundedJson({
+                summary: map.summary,
+                targetFiles: map.targetFiles,
+                relatedFiles: map.relatedFiles,
+                impactedFiles: map.impactedFiles,
+                suggestedChecks: map.suggestedChecks,
+                structure: map.structure
+            }, maxTokens);
+        }
+
+        const map = this.projectMapService.buildWorkspaceMap();
+        return this.toBoundedJson({
+            summary: map.summary,
+            entries: map.entries
+        }, maxTokens);
+    }
+
+    async searchText(query: string, maxTokens: number = 1600): Promise<string> {
+        const chunks = await this.vectorStore.search(query, 8);
+        const map = await this.projectMapService.buildRelevantMap(query, chunks);
+        return this.toBoundedJson({
+            summary: `Search results for "${query}"`,
+            targetFiles: map.targetFiles,
+            relatedFiles: map.relatedFiles,
+            impactedFiles: map.impactedFiles,
+            suggestedChecks: map.suggestedChecks,
+            snippets: chunks.slice(0, 5).map(chunk => ({
+                file: this.relativePath(chunk.filePath),
+                lines: `${chunk.lineStart}-${chunk.lineEnd}`,
+                snippet: this.compactSnippet(chunk.content, 420)
+            }))
+        }, maxTokens);
+    }
+
+    async impactText(fileOrQuery: string, maxTokens: number = 1400): Promise<string> {
+        const target = this.astManager.findFilesInQuery(fileOrQuery, 1)[0];
+        if (!target) {
+            return this.toBoundedJson({
+                summary: `No indexed file matched "${fileOrQuery}".`,
+                targetFiles: [],
+                relatedFiles: [],
+                impactedFiles: [],
+                suggestedChecks: ['Run AI Memory indexing, then retry with a file name or relative path.']
+            }, maxTokens);
+        }
+
+        const impact = await this.astManager.getFileImpact(target);
+        const localImports = impact.imports
+            .filter(file => this.astManager.isIndexedFile(file))
+            .map(file => this.relativePath(file));
+        const directDependents = impact.directDependents.map(file => this.relativePath(file));
+        const impactedFiles = impact.impactedFiles
+            .filter(file => file !== impact.filePath)
+            .map(file => this.relativePath(file));
+        const map = await this.projectMapService.buildRelevantMap(fileOrQuery, []);
+
+        return this.toBoundedJson({
+            summary: `Impact for ${this.relativePath(impact.filePath)}`,
+            targetFiles: [this.relativePath(impact.filePath)],
+            relatedFiles: [...new Set([...localImports, ...directDependents])],
+            impactedFiles,
+            suggestedChecks: map.suggestedChecks,
+            structure: map.structure
+        }, maxTokens);
+    }
+
+    async answerText(query: string, maxTokens: number = 2400): Promise<string> {
+        const answer = await this.brain.ask(query);
+        return this.toBoundedJson({
+            summary: `Grounded AI Memory answer for "${query}"`,
+            answer: this.compactSnippet(answer, Math.max(1000, maxTokens * 4 - 400))
+        }, maxTokens);
+    }
+
+    private toBoundedJson(value: unknown, maxTokens: number): string {
+        const maxChars = Math.max(800, maxTokens * 4);
+        const text = JSON.stringify(value, null, 2);
+        if (text.length <= maxChars) {
+            return text;
+        }
+
+        return JSON.stringify({
+            truncated: true,
+            maxTokens,
+            preview: text.slice(0, maxChars - 220),
+            note: 'Output was compacted to stay under the requested token budget.'
+        }, null, 2);
+    }
+
+    private compactSnippet(content: string, maxChars: number): string {
+        const compact = content.replace(/\s+/g, ' ').trim();
+        return compact.length > maxChars ? `${compact.slice(0, maxChars)}...` : compact;
+    }
+
+    private relativePath(filePath: string): string {
+        return path.relative(this.workspaceRoot, path.resolve(filePath)).replace(/\\/g, '/');
+    }
+}
+
+
+======================================================
+FILE: src/mcp_server.ts
+======================================================
+
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
+import { LocalGroundedAnswerProvider } from './ai/LocalGroundedAnswerProvider';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import { TransformersEmbeddingProvider } from './ai/TransformersEmbeddingProvider';
+import { HybridEmbeddingProvider } from './ai/HybridEmbeddingProvider';
+import { BrainManager } from './brain/BrainManager';
+import { ASTManager } from './graph/ASTManager';
+import { AiMemoryMcpTools } from './mcp/AiMemoryMcpTools';
+import { VectorStore } from './memory/VectorStore';
+import { ProjectMapService } from './project/ProjectMapService';
+
+console.log = (...args: unknown[]) => console.error(...args);
+
+const supportedExtensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.py']);
+const ignoredDirectories = new Set([
+    'node_modules',
+    '.git',
+    'dist',
+    'out',
+    'build',
+    '.ai-memory-db',
+    '.ai-memory-model-cache',
+    '.npm-cache',
+    '.vscode-test',
+    '.pytest_cache',
+    '.ruff_cache',
+    '.mypy_cache',
+    '.claude',
+    '.claude-flow',
+    '.swarm',
+    '.agent',
+    'logs',
+    'data',
+    'screenshots',
+    'tmp',
+    'whatsapp_session',
+    '__pycache__'
+]);
+
+export async function createMcpToolsFromWorkspace(workspaceRoot: string): Promise<AiMemoryMcpTools> {
+    const resolvedWorkspace = path.resolve(workspaceRoot);
+    const astManager = new ASTManager(resolvedWorkspace);
+    await astManager.init();
+    await hydrateGraph(astManager, resolvedWorkspace);
+
+    const transformerEmbedding = new TransformersEmbeddingProvider(
+        () => 'Xenova/all-MiniLM-L6-v2',
+        () => 384,
+        () => path.join(os.homedir(), '.cache', 'ai-memory-extension', 'transformers')
+    );
+    const vectorStore = new VectorStore(
+        resolvedWorkspace,
+        new HybridEmbeddingProvider(transformerEmbedding, new LocalKeywordEmbeddingProvider(384))
+    );
+    await vectorStore.init();
+
+    const brain = new BrainManager(vectorStore, astManager, new LocalGroundedAnswerProvider());
+    const projectMapService = new ProjectMapService(resolvedWorkspace, astManager);
+    return new AiMemoryMcpTools(resolvedWorkspace, astManager, vectorStore, brain, projectMapService);
+}
+
+async function main() {
+    const workspace = readArg('--workspace') || process.cwd();
+    const tools = await createMcpToolsFromWorkspace(workspace);
+    const server = new McpServer({
+        name: 'ai-memory-os',
+        version: '1.0.0'
+    });
+
+    const textResult = (text: string) => ({
+        content: [{ type: 'text' as const, text }]
+    });
+
+    server.registerTool(
+        'ai_memory_status',
+        {
+            title: 'AI Memory Status',
+            description: 'Show index, graph, and embedding provider status for the workspace.'
+        },
+        async () => textResult(await tools.statusText())
+    );
+
+    server.registerTool(
+        'ai_memory_project_map',
+        {
+            title: 'AI Memory Project Map',
+            description: 'Return a compact workspace map, or a query-focused relevant structure map.',
+            inputSchema: z.object({
+                query: z.string().optional(),
+                maxTokens: z.number().int().positive().max(8000).optional()
+            })
+        },
+        async ({ query, maxTokens }) => textResult(await tools.projectMapText(query, maxTokens))
+    );
+
+    server.registerTool(
+        'ai_memory_search',
+        {
+            title: 'AI Memory Search',
+            description: 'Search indexed memory and return bounded snippets plus related/impacted files.',
+            inputSchema: z.object({
+                query: z.string().min(1),
+                maxTokens: z.number().int().positive().max(8000).optional()
+            })
+        },
+        async ({ query, maxTokens }) => textResult(await tools.searchText(query, maxTokens))
+    );
+
+    server.registerTool(
+        'ai_memory_impact',
+        {
+            title: 'AI Memory Impact',
+            description: 'Resolve a file name/path from a query and return direct users, affected files, and checks.',
+            inputSchema: z.object({
+                fileOrQuery: z.string().min(1),
+                maxTokens: z.number().int().positive().max(8000).optional()
+            })
+        },
+        async ({ fileOrQuery, maxTokens }) => textResult(await tools.impactText(fileOrQuery, maxTokens))
+    );
+
+    server.registerTool(
+        'ai_memory_answer',
+        {
+            title: 'AI Memory Answer',
+            description: 'Return a grounded local answer using compact project map, graph impact, and snippets.',
+            inputSchema: z.object({
+                query: z.string().min(1),
+                maxTokens: z.number().int().positive().max(12000).optional()
+            })
+        },
+        async ({ query, maxTokens }) => textResult(await tools.answerText(query, maxTokens))
+    );
+
+    await server.connect(new StdioServerTransport());
+}
+
+async function hydrateGraph(astManager: ASTManager, workspaceRoot: string): Promise<void> {
+    const files = await collectSourceFiles(workspaceRoot, workspaceRoot);
+    for (const file of files) {
+        try {
+            await astManager.parseFile(file, await fs.promises.readFile(file, 'utf8'));
+        } catch (error) {
+            console.warn(`AI Memory MCP skipped ${file}:`, error);
+        }
+    }
+}
+
+async function collectSourceFiles(workspaceRoot: string, directory: string, files: string[] = []): Promise<string[]> {
+    let entries: fs.Dirent[];
+    try {
+        entries = await fs.promises.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+        console.warn(`AI Memory MCP skipped unreadable directory ${directory}:`, error);
+        return files;
+    }
+
+    for (const entry of entries) {
+        const fullPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            if (!ignoredDirectories.has(entry.name)) {
+                await collectSourceFiles(workspaceRoot, fullPath, files);
+            }
+            continue;
+        }
+
+        if (!entry.isFile() || !supportedExtensions.has(path.extname(fullPath))) {
+            continue;
+        }
+
+        const stat = await fs.promises.stat(fullPath);
+        if (stat.size <= 512 * 1024 && path.resolve(fullPath).startsWith(workspaceRoot)) {
+            files.push(fullPath);
+        }
+    }
+
+    return files;
+}
+
+function readArg(name: string): string | undefined {
+    const index = process.argv.indexOf(name);
+    if (index === -1) return undefined;
+    return process.argv[index + 1];
+}
+
+if (require.main === module) {
+    main().catch(error => {
+        console.error('AI Memory MCP server failed:', error);
+        process.exit(1);
+    });
+}
+
+
+======================================================
+FILE: src/mechanics/ContinuousDiffEngine.ts
+======================================================
+
+import * as vscode from 'vscode';
+import { WorkspaceIndexService } from '../indexing/WorkspaceIndexService';
+
+export class ContinuousDiffEngine implements vscode.Disposable {
+    private fileSystemWatcher: vscode.FileSystemWatcher | undefined;
+    private debounceTimer: NodeJS.Timeout | null = null;
+
+    constructor(private readonly indexService: WorkspaceIndexService) {}
+
+    startWatching() {
+        // Watch for all file saves in the workspace
+        this.fileSystemWatcher = vscode.workspace.createFileSystemWatcher('**/*');
+
+        this.fileSystemWatcher.onDidCreate(async (uri) => {
+            this.handleFileChange(uri);
+        });
+        this.fileSystemWatcher.onDidChange(async (uri) => {
+            this.handleFileChange(uri);
+        });
+        this.fileSystemWatcher.onDidDelete(async (uri) => {
+            await this.indexService.deleteFile(uri.fsPath);
+            vscode.window.setStatusBarMessage('$(trash) AI Memory: Removed deleted file', 2000);
+        });
+
+        console.log('ContinuousDiffEngine is watching for file changes.');
+    }
+
+    private handleFileChange(uri: vscode.Uri) {
+        if (!this.indexService.shouldIndexFile(uri.fsPath)) {
+            return;
+        }
+
+        // Debounce to prevent multiple triggers for rapid saves
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+        }
+
+        this.debounceTimer = setTimeout(async () => {
+            try {
+                console.log(`Detected change in ${uri.fsPath}, updating Memory...`);
+
+                await this.indexService.indexFile(uri.fsPath);
+                vscode.window.setStatusBarMessage('$(sync~spin) AI Memory: Updated context', 2000);
+            } catch (err) {
+                console.error(`Error updating memory for ${uri.fsPath}:`, err);
+            }
+        }, 2000); // 2 second debounce
+    }
+
+    dispose() {
+        if (this.fileSystemWatcher) {
+            this.fileSystemWatcher.dispose();
+        }
+        if (this.debounceTimer) {
+            clearTimeout(this.debounceTimer);
+        }
+    }
+}
+
+
+======================================================
+FILE: src/memory/CacheManager.ts
+======================================================
+
+export interface PromptBudget {
+    maxTokens: number;
+    preferredChunkCount: number;
+}
+
+export class CacheManager {
+    private budget: PromptBudget;
+
+    constructor(maxTokens: number = 150000) {
+        this.budget = {
+            maxTokens: maxTokens,
+            preferredChunkCount: 5
+        };
+    }
+
+    /**
+     * Optimizes context to fit within a specific token budget.
+     * Useful for Free Plan users.
+     */
+    optimizeContext(chunks: any[], query: string, graphContext: string = "", projectMapContext: string = ""): string {
+        console.log(`Optimizing context for budget: ${this.budget.maxTokens} tokens...`);
+        
+        // 1. Sort chunks by relevance score (already done by vector search)
+        // 2. Estimate tokens (rough estimate: 4 chars = 1 token)
+        let totalTokens = 0;
+        const acceptedChunks = [];
+
+        for (const chunk of chunks) {
+            const estimatedTokens = Math.ceil(chunk.content.length / 4);
+            
+            // Stay well under the budget (leave room for the query and AI response)
+            // For a 150k limit, we aim to keep context under 100k or even much less (5k-10k)
+            // for maximum speed and cost efficiency.
+            const safetyLimit = Math.min(this.budget.maxTokens * 0.8, 10000); 
+
+            if (totalTokens + estimatedTokens < safetyLimit) {
+                acceptedChunks.push(chunk);
+                totalTokens += estimatedTokens;
+            } else {
+                break;
+            }
+        }
+
+        // 3. Construct the optimized prompt
+        let prompt = `QUESTION:\n${query}\n\n`;
+        prompt += `RELEVANT CODE CONTEXT (Budget-Optimized):\n`;
+        prompt += `=========================================\n\n`;
+
+        if (projectMapContext) {
+            prompt += `COMPACT PROJECT MAP:\n${projectMapContext}\n\n`;
+        }
+
+        acceptedChunks.forEach((c, i) => {
+            prompt += `[File ${i+1}: ${c.filePath}]\n`;
+            prompt += `Lines: ${c.lineStart}-${c.lineEnd}\n`;
+            prompt += `\`\`\`\n${this.pruneCode(c.content)}\n\`\`\`\n\n`;
+        });
+
+        if (graphContext) {
+            prompt += `GRAPH CONTEXT:\n${graphContext}\n\n`;
+        }
+
+        return prompt;
+    }
+
+    /**
+     * Removes noise like heavy comments or docstrings if we are tight on budget.
+     */
+    private pruneCode(code: string): string {
+        // Basic pruning: remove large comment blocks to save tokens
+        return code
+            .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '') // Remove JS/TS comments
+            .replace(/'''[\s\S]*?'''|"""[\s\S]*?"""|#.*$/gm, '') // Remove Python comments/docstrings
+            .split('\n')
+            .filter(line => line.trim().length > 0)
+            .join('\n');
+    }
+}
+
+
+======================================================
+FILE: src/memory/VectorStore.ts
+======================================================
+
+import * as lancedb from '@lancedb/lancedb';
+import * as path from 'path';
+import * as fs from 'fs';
+import { EmbeddingProvider } from '../ai/EmbeddingProvider';
+
+export interface CodeChunk {
+    filePath: string;
+    content: string;
+    vector?: number[];
+    metadata: {
+        lineStart: number;
+        lineEnd: number;
+        type: string; // 'function', 'class', 'chunk'
+    };
+}
+
+export class VectorStore {
+    private db: lancedb.Connection | null = null;
+    private table: lancedb.Table | null = null;
+    private readonly dbPath: string;
+    private readonly tableName = 'code_chunks_v2';
+    private readonly workspacePath: string;
+    private readonly stopWords = new Set([
+        'a', 'an', 'and', 'are', 'as', 'at', 'codebase', 'does', 'for', 'from',
+        'handle', 'how', 'in', 'is', 'it', 'makima', 'of', 'on', 'or', 'project',
+        'the', 'this', 'to', 'with'
+    ]);
+
+    constructor(workspacePath: string, private readonly embeddingProvider: EmbeddingProvider) {
+        this.workspacePath = workspacePath;
+        this.dbPath = path.join(workspacePath, '.ai-memory-db');
+    }
+
+    async init() {
+        if (!fs.existsSync(this.dbPath)) {
+            fs.mkdirSync(this.dbPath, { recursive: true });
+        }
+        this.db = await lancedb.connect(this.dbPath);
+        
+        try {
+            this.table = await this.db.openTable(this.tableName);
+        } catch (e) {
+            // Table doesn't exist, create it later when first data arrives
+            this.table = null;
+        }
+        console.log('VectorStore initialized at:', this.dbPath);
+    }
+
+    async addChunks(chunks: CodeChunk[]) {
+        if (!this.db) throw new Error('Database not initialized');
+        if (chunks.length === 0) return;
+
+        const dataWithVectors = [];
+        for (const chunk of chunks) {
+            const vector = await this.embeddingProvider.embed(this.buildEmbeddingText(chunk), {
+                taskType: 'RETRIEVAL_DOCUMENT',
+                title: path.basename(chunk.filePath)
+            });
+            dataWithVectors.push({
+                vector,
+                filePath: chunk.filePath,
+                content: chunk.content,
+                lineStart: chunk.metadata.lineStart,
+                lineEnd: chunk.metadata.lineEnd,
+                type: chunk.metadata.type,
+                embeddingProvider: await this.getEmbeddingProviderName()
+            });
+        }
+
+        if (!this.table) {
+            this.table = await this.db.createTable(this.tableName, dataWithVectors);
+        } else {
+            await this.table.add(dataWithVectors);
+        }
+    }
+
+    async upsert(filePath: string, chunks: CodeChunk[]) {
+        if (!this.db) throw new Error('Database not initialized');
+        
+        // Remove old chunks for this file
+        if (this.table) {
+            try {
+                // LanceDB delete by filter
+                await this.table.delete(`filePath = '${this.escapeFilterValue(filePath)}'`);
+            } catch (e) {
+                console.warn('Error deleting old chunks:', e);
+            }
+        }
+
+        if (chunks.length > 0) {
+            await this.addChunks(chunks);
+        }
+    }
+
+    async search(query: string, limit: number = 5) {
+        if (!this.table) return [];
+        const providerName = await this.getEmbeddingProviderName();
+        const storedProviderName = await this.getStoredEmbeddingProviderName();
+        if ((storedProviderName ?? providerName).startsWith('local-keyword')) {
+            return this.localKeywordSearch(query, limit);
+        }
+
+        try {
+            const queryVector = await this.embeddingProvider.embed(query, {
+                taskType: 'RETRIEVAL_QUERY'
+            });
+            const vectorResults = await this.table.vectorSearch(queryVector)
+                .limit(Math.max(30, limit * 8))
+                .toArray();
+            const lexicalResults = await this.localKeywordSearch(query, Math.max(30, limit * 8));
+            return this.mergeHybridResults(query, vectorResults, lexicalResults, limit);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`AI Memory vector search failed, using keyword fallback: ${message}`);
+            return this.localKeywordSearch(query, limit);
+        }
+    }
+
+    async deleteFile(filePath: string) {
+        if (!this.table) return;
+        await this.table.delete(`filePath = '${this.escapeFilterValue(filePath)}'`);
+    }
+
+    async getChunkCount(): Promise<number> {
+        if (!this.table) return 0;
+        return this.table.countRows();
+    }
+
+    async getEmbeddingProviderName(): Promise<string> {
+        return this.embeddingProvider.getActiveProviderName
+            ? this.embeddingProvider.getActiveProviderName()
+            : this.embeddingProvider.name;
+    }
+
+    private async getStoredEmbeddingProviderName(): Promise<string | undefined> {
+        if (!this.table) return undefined;
+
+        try {
+            const rows = await this.table.query()
+                .select(['embeddingProvider'])
+                .limit(1)
+                .toArray();
+            return rows[0]?.embeddingProvider;
+        } catch (error) {
+            return undefined;
+        }
+    }
+
+    async clear() {
+        if (this.db) {
+            try {
+                await this.db.dropTable(this.tableName);
+                this.table = null;
+            } catch (e) {}
+        }
+    }
+
+    private escapeFilterValue(value: string): string {
+        return value.replace(/'/g, "''");
+    }
+
+    private buildEmbeddingText(chunk: CodeChunk): string {
+        const relativePath = path.relative(this.workspacePath, chunk.filePath);
+        return `${relativePath}\n${chunk.metadata.type}\n${chunk.content}`;
+    }
+
+    private async localKeywordSearch(query: string, limit: number): Promise<any[]> {
+        if (!this.table) return [];
+
+        const rows = await this.table.query()
+            .select(['filePath', 'content', 'lineStart', 'lineEnd', 'type', 'embeddingProvider'])
+            .toArray();
+        const ranked = this.rerankLocalResults(query, rows)
+            .filter(result => result._score > 0);
+
+        return (ranked.length > 0 ? ranked : rows).slice(0, limit);
+    }
+
+    private rerankLocalResults(query: string, results: any[]): any[] {
+        const queryTokens = this.tokenize(query);
+        if (queryTokens.length === 0) return results;
+        const normalizedQuery = query.toLowerCase();
+
+        return results
+            .map(result => {
+                const pathScore = this.lexicalScore(queryTokens, result.filePath) * 4;
+                const contentScore = this.lexicalScore(queryTokens, result.content);
+                const score = pathScore + contentScore + this.intentPathBoost(normalizedQuery, result.filePath);
+
+                return {
+                    result: {
+                        ...result,
+                        _score: score
+                    },
+                    score
+                };
+            })
+            .sort((a, b) => {
+                if (b.score !== a.score) return b.score - a.score;
+                return (a.result._distance ?? 0) - (b.result._distance ?? 0);
+            })
+            .map(item => item.result);
+    }
+
+    private mergeHybridResults(query: string, vectorResults: any[], lexicalResults: any[], limit: number): any[] {
+        const merged = new Map<string, any>();
+
+        const add = (result: any) => {
+            const key = `${result.filePath}:${result.lineStart}:${result.lineEnd}`;
+            const existing = merged.get(key);
+            if (!existing) {
+                merged.set(key, { ...result });
+                return;
+            }
+
+            merged.set(key, {
+                ...existing,
+                ...result,
+                _distance: this.bestDistance(existing._distance, result._distance)
+            });
+        };
+
+        vectorResults.forEach(add);
+        lexicalResults.forEach(add);
+
+        const queryTokens = this.tokenize(query);
+        const normalizedQuery = query.toLowerCase();
+
+        return Array.from(merged.values())
+            .map(result => {
+                const pathScore = this.lexicalScore(queryTokens, result.filePath) * 4;
+                const contentScore = this.lexicalScore(queryTokens, result.content);
+                const intentBoost = this.intentPathBoost(normalizedQuery, result.filePath);
+                const semanticBoost = typeof result._distance === 'number'
+                    ? Math.max(0, 2 - result._distance) * 3
+                    : 0;
+                const score = pathScore + contentScore + intentBoost + semanticBoost;
+
+                return {
+                    ...result,
+                    _score: score
+                };
+            })
+            .sort((a, b) => {
+                if (b._score !== a._score) return b._score - a._score;
+                return (a._distance ?? 0) - (b._distance ?? 0);
+            })
+            .slice(0, limit);
+    }
+
+    private bestDistance(first: unknown, second: unknown): number | undefined {
+        if (typeof first === 'number' && typeof second === 'number') {
+            return Math.min(first, second);
+        }
+        if (typeof first === 'number') return first;
+        if (typeof second === 'number') return second;
+        return undefined;
+    }
+
+    private intentPathBoost(normalizedQuery: string, filePath: string): number {
+        const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+
+        if ((normalizedQuery.includes('speech to text') || normalizedQuery.includes('voice input')) && normalizedPath.includes('stt')) {
+            return 20;
+        }
+
+        if ((normalizedQuery.includes('text to speech') || normalizedQuery.includes('voice output')) && normalizedPath.includes('tts')) {
+            return 20;
+        }
+
+        return 0;
+    }
+
+    private lexicalScore(queryTokens: string[], text: string): number {
+        const textTokens = new Set(this.tokenize(text));
+        let score = 0;
+
+        for (const token of queryTokens) {
+            if (textTokens.has(token)) {
+                score += token.length <= 3 ? 1 : 3;
+            }
+        }
+
+        return score;
+    }
+
+    private tokenize(text: string): string[] {
+        const normalized = text
+            .replace(/([a-z])([A-Z])/g, '$1 $2')
+            .replace(/[_-]/g, ' ')
+            .toLowerCase()
+        const tokens: string[] = normalized.match(/[a-z0-9]+/g) ?? [];
+
+        if (normalized.includes('speech to text') || normalized.includes('voice input')) {
+            tokens.push('stt', 'transcription');
+        }
+        if (normalized.includes('text to speech') || normalized.includes('voice output')) {
+            tokens.push('tts', 'synthesis');
+        }
+
+        return tokens.filter(token => !this.stopWords.has(token));
+    }
+}
+
+
+======================================================
+FILE: src/project/ProjectMapService.ts
+======================================================
+
+import * as path from 'path';
+import { AnswerContextChunk } from '../ai/AnswerProvider';
+import { ASTManager } from '../graph/ASTManager';
+
+export interface ProjectMapEntry {
+    path: string;
+    kind: 'directory' | 'file';
+    fileCount: number;
+    purpose: string;
+    importantFiles: string[];
+}
+
+export interface WorkspaceProjectMap {
+    summary: string;
+    entries: ProjectMapEntry[];
+}
+
+export interface RelevantProjectMap {
+    summary: string;
+    targetFiles: string[];
+    relatedFiles: string[];
+    impactedFiles: string[];
+    structure: string[];
+    suggestedChecks: string[];
+}
+
+export class ProjectMapService {
+    constructor(
+        private readonly workspaceRoot: string,
+        private readonly astManager: ASTManager
+    ) {}
+
+    buildWorkspaceMap(maxEntries: number = 12): WorkspaceProjectMap {
+        const indexedFiles = this.astManager.getIndexedFiles();
+        const groups = new Map<string, string[]>();
+
+        for (const filePath of indexedFiles) {
+            const relativePath = this.toRelative(filePath);
+            const parts = relativePath.split('/');
+            const key = parts.length > 1 ? `${parts[0]}/` : relativePath;
+            groups.set(key, [...(groups.get(key) || []), relativePath]);
+        }
+
+        const entries = [...groups.entries()]
+            .map(([groupPath, files]) => ({
+                path: groupPath,
+                kind: groupPath.endsWith('/') ? 'directory' as const : 'file' as const,
+                fileCount: files.length,
+                purpose: this.inferPurpose(groupPath),
+                importantFiles: this.pickImportantFiles(files)
+            }))
+            .sort((a, b) => b.fileCount - a.fileCount || a.path.localeCompare(b.path))
+            .slice(0, maxEntries);
+
+        return {
+            summary: `${indexedFiles.length} indexed source file(s) grouped into ${groups.size} top-level area(s).`,
+            entries
+        };
+    }
+
+    async buildRelevantMap(
+        query: string,
+        chunks: AnswerContextChunk[] = [],
+        maxFiles: number = 12
+    ): Promise<RelevantProjectMap> {
+        const fileMatches = this.astManager.findFilesInQuery(query, 4);
+        const targetFiles = fileMatches.length > 0
+            ? fileMatches
+            : this.unique(chunks.slice(0, 3).map(chunk => chunk.filePath));
+        const relatedFiles: string[] = [];
+        const impactedFiles: string[] = [];
+
+        for (const filePath of targetFiles) {
+            const impact = await this.astManager.getFileImpact(filePath);
+            relatedFiles.push(
+                ...impact.imports.filter(file => this.astManager.isIndexedFile(file)),
+                ...impact.directDependents
+            );
+            impactedFiles.push(...impact.impactedFiles.filter(file => file !== impact.filePath));
+        }
+
+        chunks.slice(0, maxFiles).forEach(chunk => {
+            if (!targetFiles.includes(chunk.filePath)) {
+                relatedFiles.push(chunk.filePath);
+            }
+        });
+
+        const targetRelative = this.toRelativeList(targetFiles).slice(0, maxFiles);
+        const relatedRelative = this.toRelativeList(this.unique(relatedFiles))
+            .filter(file => !targetRelative.includes(file))
+            .slice(0, maxFiles);
+        const impactedRelative = this.toRelativeList(this.unique(impactedFiles))
+            .filter(file => !targetRelative.includes(file))
+            .slice(0, maxFiles);
+
+        return {
+            summary: `Compact project context for "${query}": ${targetRelative.length} target file(s), ${relatedRelative.length} related file(s), ${impactedRelative.length} impacted file(s).`,
+            targetFiles: targetRelative,
+            relatedFiles: relatedRelative,
+            impactedFiles: impactedRelative,
+            structure: this.buildRelevantStructure([...targetRelative, ...relatedRelative, ...impactedRelative]),
+            suggestedChecks: this.buildSuggestedChecks(targetRelative, impactedRelative)
+        };
+    }
+
+    renderWorkspaceMap(map: WorkspaceProjectMap): string {
+        const lines = ['Project Map:', map.summary];
+        for (const entry of map.entries) {
+            const important = entry.importantFiles.length > 0
+                ? `; key: ${entry.importantFiles.join(', ')}`
+                : '';
+            lines.push(`- ${entry.path} ${entry.purpose} (${entry.fileCount} file${entry.fileCount === 1 ? '' : 's'}${important})`);
+        }
+        return lines.join('\n');
+    }
+
+    renderRelevantMap(map: RelevantProjectMap): string {
+        const lines = [
+            'Project Map Context:',
+            map.summary,
+            '',
+            'Relevant Structure:',
+            ...(map.structure.length > 0 ? map.structure.map(item => `- ${item}`) : ['- none detected']),
+            '',
+            `Target files: ${map.targetFiles.length > 0 ? map.targetFiles.join(', ') : 'none detected'}`,
+            `Related files: ${map.relatedFiles.length > 0 ? map.relatedFiles.join(', ') : 'none detected'}`,
+            `Impacted files: ${map.impactedFiles.length > 0 ? map.impactedFiles.join(', ') : 'none detected'}`,
+            '',
+            'Suggested Checks:',
+            ...map.suggestedChecks.map(check => `- ${check}`)
+        ];
+
+        return lines.join('\n');
+    }
+
+    private buildRelevantStructure(files: string[]): string[] {
+        const groups = new Map<string, string[]>();
+        for (const file of this.unique(files)) {
+            const parts = file.split('/');
+            const group = parts.length > 1 ? `${parts[0]}/` : '(root)';
+            groups.set(group, [...(groups.get(group) || []), file]);
+        }
+
+        return [...groups.entries()]
+            .sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([group, groupFiles]) => `${group}: ${groupFiles.slice(0, 8).join(', ')}`);
+    }
+
+    private buildSuggestedChecks(targetFiles: string[], impactedFiles: string[]): string[] {
+        const checks = [
+            'Inspect target public functions/classes before editing.',
+            'Review direct users before changing return types or side effects.'
+        ];
+        const testFiles = impactedFiles.filter(file => /(^|\/)(tests?|specs?)\//i.test(file) || /test|spec/i.test(path.basename(file)));
+        const scriptFiles = impactedFiles.filter(file => /(^|\/)scripts?\//i.test(file) || /(^|\/)scratch\//i.test(file));
+
+        if (testFiles.length > 0) {
+            checks.push(`Run/review impacted tests: ${testFiles.slice(0, 6).join(', ')}.`);
+        }
+        if (scriptFiles.length > 0) {
+            checks.push(`Check manual/demo flows: ${scriptFiles.slice(0, 4).join(', ')}.`);
+        }
+        if (targetFiles.length > 0) {
+            checks.push(`Ask for snippets only from these target files first: ${targetFiles.slice(0, 4).join(', ')}.`);
+        }
+
+        return checks;
+    }
+
+    private pickImportantFiles(files: string[]): string[] {
+        return files
+            .filter(file => /(^|\/)(index|main|app|extension|cli|server|test|config)[._-]/i.test(file) || /test|spec/i.test(path.basename(file)))
+            .slice(0, 5);
+    }
+
+    private inferPurpose(groupPath: string): string {
+        const name = groupPath.replace(/\/$/, '').toLowerCase();
+        if (name === 'core') return 'core engines/runtime';
+        if (name === 'ui' || name === 'views' || name === 'components') return 'user interface';
+        if (name === 'test' || name === 'tests' || name === '__tests__') return 'automated checks';
+        if (name === 'script' || name === 'scripts' || name === 'scratch') return 'manual/dev flows';
+        if (name === 'src') return 'extension/application source';
+        if (name.includes('agent')) return 'agent behavior';
+        if (name.includes('memory')) return 'memory/indexing';
+        if (name.includes('graph')) return 'dependency graph';
+        if (name.includes('config')) return 'configuration';
+        if (name.includes('doc')) return 'documentation';
+        return 'source area';
+    }
+
+    private toRelativeList(files: string[]): string[] {
+        return files.map(file => this.toRelative(file));
+    }
+
+    private toRelative(filePath: string): string {
+        return path.relative(this.workspaceRoot, path.resolve(filePath)).replace(/\\/g, '/');
+    }
+
+    private unique(values: string[]): string[] {
+        return [...new Set(values.filter(Boolean))];
+    }
+}
+
+
+======================================================
+FILE: src/test_ast.ts
+======================================================
+
+import { ASTManager } from './graph/ASTManager';
+
+async function runTest() {
+    console.log('--- Starting ASTManager Test ---');
+    
+    const astManager = new ASTManager();
+    
+    const authContent = `
+        export function login() {
+            console.log('Logging in');
+        }
+    `;
+    
+    const userContent = `
+        import { login } from './auth';
+        
+        function handleUser() {
+            login();
+        }
+    `;
+    
+    const paymentContent = `
+        const { login } = require('./auth');
+        
+        function handlePayment() {
+            login();
+        }
+    `;
+    
+    console.log('Parsing files...');
+    await astManager.parseFile('auth.ts', authContent);
+    await astManager.parseFile('user.ts', userContent);
+    await astManager.parseFile('payment.js', paymentContent);
+    
+    console.log('\n--- Running Impact Analysis ---');
+    console.log('If we change auth.ts, what files are affected?');
+    
+    const impact = await astManager.analyzeImpact('auth.ts');
+    console.log('Impacted files:', impact);
+    
+    if (impact.includes('user.ts') && impact.includes('payment.js')) {
+        console.log('✅ TEST PASSED: Impact analysis correctly identified dependents.');
+    } else {
+        console.error('❌ TEST FAILED: Missing dependents in impact analysis.');
+    }
+}
+
+runTest().catch(console.error);
+
+
+======================================================
+FILE: src/test_makima.ts
+======================================================
+
+import { ASTManager } from './graph/ASTManager';
+import { VectorStore } from './memory/VectorStore';
+import { BrainManager } from './brain/BrainManager';
+import { LocalGroundedAnswerProvider } from './ai/LocalGroundedAnswerProvider';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import * as path from 'path';
+import * as fs from 'fs';
+
+async function testOnMakima() {
+    console.log('🧪 --- Testing AI Memory on Makima Fixed --- 🧪');
+    
+    const makimaPath = 'c:\\code\\makima_fixed';
+    const ast = new ASTManager(makimaPath);
+    const vector = new VectorStore(path.join(__dirname, 'makima-db'), new LocalKeywordEmbeddingProvider());
+    const brain = new BrainManager(vector, ast, new LocalGroundedAnswerProvider());
+
+    await ast.init();
+    await vector.init();
+
+    // Helper to recursively find python files
+    function getPythonFiles(dir: string, fileList: string[] = []): string[] {
+        if (!fs.existsSync(dir)) return fileList;
+        const files = fs.readdirSync(dir);
+        files.forEach(file => {
+            const filePath = path.join(dir, file);
+            if (fs.statSync(filePath).isDirectory()) {
+                if (!['node_modules', '.git', '__pycache__', '.agent'].includes(file)) {
+                    getPythonFiles(filePath, fileList);
+                }
+            } else if (file.endsWith('.py')) {
+                fileList.push(filePath);
+            }
+        });
+        return fileList;
+    }
+
+    console.log('Scanning for Python files in core/ and agents/...');
+    const coreFiles = getPythonFiles(path.join(makimaPath, 'core'));
+    const agentsFiles = getPythonFiles(path.join(makimaPath, 'agents'));
+    const mainFile = path.join(makimaPath, 'makima_assistant.py');
+    
+    const filesToIndex = [...coreFiles, ...agentsFiles];
+    if (fs.existsSync(mainFile)) filesToIndex.push(mainFile);
+
+    console.log(`Found ${filesToIndex.length} files to index.`);
+
+    // Index them
+    for (let i = 0; i < filesToIndex.length; i++) {
+        const file = filesToIndex[i];
+        if (i % 10 === 0) console.log(`Progress: ${i}/${filesToIndex.length}...`);
+        
+        const content = fs.readFileSync(file, 'utf-8');
+        await ast.parseFile(file, content);
+        
+        const lines = content.split('\n');
+        const chunks = [];
+        for (let j = 0; j < lines.length; j += 100) {
+            chunks.push({
+                filePath: file,
+                content: lines.slice(j, j + 100).join('\n'),
+                metadata: { lineStart: j + 1, lineEnd: j + 100, type: 'chunk' }
+            });
+        }
+        await vector.upsert(file, chunks);
+    }
+
+    console.log('\n--- BRAIN: ASK QUESTION TEST ---');
+    const query = 'How does the voice engine handle speech to text?';
+    console.log(`Asking Brain: "${query}"`);
+    
+    const answer = await brain.ask(query);
+    console.log('\n--- BRAIN ANSWER ---');
+    console.log(answer);
+
+    console.log('\n✅ Makima Brain Test Completed!');
+}
+
+testOnMakima().catch(console.error);
+
+
+======================================================
+FILE: src/test_memory.ts
+======================================================
+
+import * as assert from 'assert';
+import * as fs from 'fs';
+import * as path from 'path';
+import { AnswerContext, AnswerProvider } from './ai/AnswerProvider';
+import { LocalGroundedAnswerProvider } from './ai/LocalGroundedAnswerProvider';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import { BrainManager } from './brain/BrainManager';
+import { ASTManager } from './graph/ASTManager';
+import { WorkspaceIndexService } from './indexing/WorkspaceIndexService';
+import { AiMemoryMcpTools } from './mcp/AiMemoryMcpTools';
+import { VectorStore } from './memory/VectorStore';
+import { ProjectMapService } from './project/ProjectMapService';
+
+class MockAnswerProvider implements AnswerProvider {
+    readonly name = 'mock-answer';
+
+    async isConfigured(): Promise<boolean> {
+        return true;
+    }
+
+    async answer(context: AnswerContext): Promise<string> {
+        return `mock answer for ${context.query} using ${context.chunks.length} chunk(s)`;
+    }
+}
+
+async function main() {
+    const workspace = path.join(process.cwd(), '.ai-memory-test-workspace');
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.mkdirSync(path.join(workspace, 'payments'), { recursive: true });
+
+    try {
+        const authPath = path.join(workspace, 'auth.ts');
+        fs.writeFileSync(authPath, 'export function login(user: string) { return `token:${user}`; }\n');
+        fs.writeFileSync(path.join(workspace, 'user.ts'), 'import { login } from "./auth";\nexport const userToken = login("ada");\n');
+        fs.writeFileSync(path.join(workspace, 'payments', 'payment.js'), 'const { login } = require("../auth");\nmodule.exports = login("pay");\n');
+
+        const ast = new ASTManager(workspace);
+        await ast.init();
+
+        const vector = new VectorStore(workspace, new LocalKeywordEmbeddingProvider());
+        await vector.init();
+
+        const index = new WorkspaceIndexService(workspace, ast, vector);
+        const status = await index.indexWorkspace({ force: true });
+        assert.strictEqual(status.indexedFiles, 3, 'indexes supported source files');
+
+        const unchangedStatus = await index.indexWorkspace();
+        assert.strictEqual(unchangedStatus.indexedFiles, 0, 'skips unchanged files');
+        assert.strictEqual(unchangedStatus.skippedFiles, 3, 'counts unchanged files as skipped');
+
+        const impact = await ast.analyzeImpact(authPath);
+        assert.ok(impact.includes(path.join(workspace, 'user.ts')), 'finds TS dependent');
+        assert.ok(impact.includes(path.join(workspace, 'payments', 'payment.js')), 'finds JS dependent');
+
+        const fileMatches = ast.findFilesInQuery('I want to change auth.ts', 3);
+        assert.strictEqual(fileMatches[0], authPath, 'finds indexed file by mentioned basename');
+
+        const fileImpact = await ast.getFileImpact(authPath);
+        assert.ok(fileImpact.directDependents.includes(path.join(workspace, 'user.ts')), 'file impact includes direct TS user');
+        assert.ok(fileImpact.directDependents.includes(path.join(workspace, 'payments', 'payment.js')), 'file impact includes direct JS user');
+
+        const fileBrain = new BrainManager(vector, ast, new LocalGroundedAnswerProvider());
+        const fileAnswer = await fileBrain.ask('I want to change auth.ts');
+        assert.ok(fileAnswer.includes('File impact focus: auth.ts'), 'file-name question includes file impact focus');
+        assert.ok(fileAnswer.includes('Project Map Context'), 'answers include compact project map');
+        assert.ok(fileAnswer.includes('user.ts'), 'file-name question lists affected files');
+
+        const projectMap = new ProjectMapService(workspace, ast);
+        const workspaceMap = projectMap.buildWorkspaceMap();
+        assert.ok(workspaceMap.entries.some(entry => entry.path === 'payments/'), 'project map groups top-level folders');
+        assert.ok(!projectMap.renderWorkspaceMap(workspaceMap).includes('.ai-memory-db'), 'project map avoids internal db tree');
+
+        const relevantMap = await projectMap.buildRelevantMap('I want to change auth.ts', []);
+        assert.ok(relevantMap.targetFiles.includes('auth.ts'), 'relevant map includes target file');
+        assert.ok(relevantMap.impactedFiles.includes('user.ts'), 'relevant map includes impacted file');
+
+        const mcpTools = new AiMemoryMcpTools(workspace, ast, vector, fileBrain, projectMap);
+        const mcpStatus = await mcpTools.statusText(500);
+        assert.ok(mcpStatus.includes('graphFiles'), 'mcp status returns graph status');
+        const mcpSearch = await mcpTools.searchText('login token', 700);
+        assert.ok(mcpSearch.includes('snippets'), 'mcp search returns snippets');
+        const mcpImpact = await mcpTools.impactText('auth.ts', 700);
+        assert.ok(mcpImpact.includes('user.ts'), 'mcp impact returns affected files');
+
+        const searchResults = await vector.search('login token', 3);
+        assert.ok(searchResults.length > 0, 'search returns indexed chunks');
+
+        fs.writeFileSync(authPath, [
+            'export function login(user: string) { return `token:${user}`; }',
+            'export function logout(user: string) { return `logout:${user}`; }',
+            ''
+        ].join('\n'));
+        assert.strictEqual(await index.indexFile(authPath), true, 'changed file is upserted');
+        const changedResults = await vector.search('logout token', 3);
+        assert.ok(changedResults.some(result => result.filePath === authPath), 'changed file can be searched after upsert');
+
+        const countBeforeDelete = await vector.getChunkCount();
+        await index.deleteFile(path.join(workspace, 'user.ts'));
+        const countAfterDelete = await vector.getChunkCount();
+        assert.ok(countAfterDelete < countBeforeDelete, 'delete removes file chunks');
+
+        const localBrain = new BrainManager(vector, ast, new LocalGroundedAnswerProvider());
+        const localAnswer = await localBrain.ask('where is login handled?');
+        assert.ok(localAnswer.includes('Grounded local answer'), 'no-key answer uses grounded summary');
+
+        const mockBrain = new BrainManager(vector, ast, new MockAnswerProvider());
+        const mockAnswer = await mockBrain.ask('where is login handled?');
+        assert.ok(mockAnswer.startsWith('mock answer'), 'configured answer provider is used');
+
+        const emptyWorkspace = path.join(workspace, 'empty');
+        fs.mkdirSync(emptyWorkspace, { recursive: true });
+        const emptyAst = new ASTManager(emptyWorkspace);
+        await emptyAst.init();
+        const emptyVector = new VectorStore(emptyWorkspace, new LocalKeywordEmbeddingProvider());
+        await emptyVector.init();
+        const emptyBrain = new BrainManager(emptyVector, emptyAst, new LocalGroundedAnswerProvider());
+        const emptyAnswer = await emptyBrain.ask('anything indexed?');
+        assert.ok(emptyAnswer.includes('could not find indexed code'), 'empty index has helpful answer');
+
+        console.log('AI Memory core tests passed.');
+    } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+    }
+}
+
+main().catch(error => {
+    console.error(error);
+    process.exit(1);
+});
+
+
+======================================================
+FILE: src/test_vector.ts
+======================================================
+
+import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
+import * as path from 'path';
+import * as fs from 'fs';
+
+async function runVectorTest() {
+    console.log('--- Starting VectorStore Test ---');
+    const testWorkspace = path.join(__dirname, 'test-workspace-vector');
+    if (!fs.existsSync(testWorkspace)) fs.mkdirSync(testWorkspace);
+
+    const vectorStore = new VectorStore(testWorkspace, new LocalKeywordEmbeddingProvider());
+    await vectorStore.init();
+
+    console.log('Adding test chunks...');
+    await vectorStore.addChunks([
+        {
+            filePath: 'auth.ts',
+            content: 'export function login(user, pass) { console.log("logging in"); }',
+            metadata: { lineStart: 1, lineEnd: 1, type: 'function' }
+        },
+        {
+            filePath: 'user.ts',
+            content: 'class User { constructor(name) { this.name = name; } }',
+            metadata: { lineStart: 1, lineEnd: 1, type: 'class' }
+        },
+        {
+            filePath: 'db.ts',
+            content: 'const db = connect("mongodb://localhost:27017");',
+            metadata: { lineStart: 1, lineEnd: 1, type: 'chunk' }
+        }
+    ]);
+
+    console.log('Searching for "login function"...');
+    const results = await vectorStore.search('login function', 2);
+    
+    console.log('Search Results:');
+    results.forEach((r: any, i: number) => {
+        console.log(`${i+1}. [${r.filePath}] ${r.content.substring(0, 50)}...`);
+    });
+
+    if (results.length > 0 && results[0].filePath === 'auth.ts') {
+        console.log('✅ VECTOR TEST PASSED: Search returned relevant file.');
+    } else {
+        console.log('❌ VECTOR TEST FAILED: Result mismatch.');
+    }
+
+    // Cleanup
+    // await vectorStore.clear();
+}
+
+runVectorTest().catch(console.error);

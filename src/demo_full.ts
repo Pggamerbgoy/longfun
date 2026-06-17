@@ -1,5 +1,6 @@
 import { ASTManager } from './graph/ASTManager';
 import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -9,8 +10,8 @@ async function runFullDemo() {
     const demoDir = path.join(__dirname, 'demo-workspace');
     if (!fs.existsSync(demoDir)) fs.mkdirSync(demoDir);
 
-    const ast = new ASTManager();
-    const vector = new VectorStore(demoDir);
+    const ast = new ASTManager(demoDir);
+    const vector = new VectorStore(demoDir, new LocalKeywordEmbeddingProvider());
 
     console.log('Step 1: Initializing Systems...');
     await ast.init();

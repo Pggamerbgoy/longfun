@@ -16,6 +16,8 @@
     "node_modules",
     "out",
     "dist",
-    ".vscode-test"
+    ".vscode-test",
+    "run_test.ts",
+    "token-savings-test.ts"
   ]
 }

@@ -2,7 +2,7 @@
   "name": "ai-memory-os",
   "displayName": "AI Memory OS",
   "description": "An intelligent AI memory extension for VS Code using AST and Context Caching.",
-  "version": "1.0.0",
+  "version": "1.0.7",
   "publisher": "NOSTEX",
   "icon": "icon.png",
   "engines": {
@@ -18,7 +18,7 @@
     "Programming Languages"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "*"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -26,6 +26,22 @@
       {
         "command": "aiMemory.start",
         "title": "AI Memory: Start Service"
+      },
+      {
+        "command": "aiMemory.reindexWorkspace",
+        "title": "AI Memory: Reindex Workspace"
+      },
+      {
+        "command": "aiMemory.showIndexStatus",
+        "title": "AI Memory: Show Index Status"
+      },
+      {
+        "command": "aiMemory.setGeminiApiKey",
+        "title": "AI Memory: Set Gemini API Key"
+      },
+      {
+        "command": "aiMemory.clearGeminiApiKey",
+        "title": "AI Memory: Clear Gemini API Key"
       },
       {
         "command": "aiMemory.ask",
@@ -36,29 +52,78 @@
         "title": "AI Memory: Analyze Impact"
       },
       {
+        "command": "aiMemory.showProjectMap",
+        "title": "AI Memory: Show Project Map"
+      },
+      {
         "command": "aiMemory.showGraph",
         "title": "AI Memory: Show Dependency Graph"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Memory OS",
+      "properties": {
+        "aiMemory.autoIndexOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically build the memory index on startup when the workspace has no index yet."
+        },
+        "aiMemory.geminiModel": {
+          "type": "string",
+          "default": "gemini-2.5-flash",
+          "description": "Gemini model used for AI Memory answers."
+        },
+        "aiMemory.embeddingModel": {
+          "type": "string",
+          "default": "Xenova/all-MiniLM-L6-v2",
+          "description": "Transformers.js model used for local semantic embeddings."
+        },
+        "aiMemory.embeddingDimensions": {
+          "type": "number",
+          "default": 384,
+          "minimum": 128,
+          "maximum": 3072,
+          "description": "Embedding vector dimension used by AI Memory."
+        },
+        "aiMemory.maxIndexedFileSizeKb": {
+          "type": "number",
+          "default": 512,
+          "minimum": 32,
+          "description": "Maximum source file size, in KB, that AI Memory will index."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",
     "compile": "tsc -p ./",
+    "test": "npm run test:core",
+    "test:core": "npm run compile && node out/test_memory.js",
     "watch": "tsc -watch -p ./",
-    "package": "webpack --mode production --devtool hidden-source-map",
-    "webpack": "webpack --mode development"
+    "mcp": "npm run compile --silent && node out/mcp_server.js",
+    "package": "webpack --mode production --devtool hidden-source-map && node scripts/copy-assets.js",
+    "webpack": "webpack --mode development && node scripts/copy-assets.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.80.0",
+    "javascript-obfuscator": "^5.4.3",
     "ts-loader": "^9.4.3",
     "typescript": "^5.1.3",
     "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4"
+    "webpack-cli": "^5.1.4",
+    "webpack-obfuscator": "^3.6.1"
   },
   "dependencies": {
+    "@google/genai": "^2.5.0",
+    "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.27.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "apache-arrow": "^18.1.0",
-    "web-tree-sitter": "^0.20.8"
+    "web-tree-sitter": "^0.20.8",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "fast-uri": "^3.1.2"
   }
 }

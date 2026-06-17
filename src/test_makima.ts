@@ -1,6 +1,8 @@
 import { ASTManager } from './graph/ASTManager';
 import { VectorStore } from './memory/VectorStore';
 import { BrainManager } from './brain/BrainManager';
+import { LocalGroundedAnswerProvider } from './ai/LocalGroundedAnswerProvider';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -8,9 +10,9 @@ async function testOnMakima() {
     console.log('🧪 --- Testing AI Memory on Makima Fixed --- 🧪');
     
     const makimaPath = 'c:\\code\\makima_fixed';
-    const ast = new ASTManager();
-    const vector = new VectorStore(path.join(__dirname, 'makima-db'));
-    const brain = new BrainManager(vector, ast);
+    const ast = new ASTManager(makimaPath);
+    const vector = new VectorStore(path.join(__dirname, 'makima-db'), new LocalKeywordEmbeddingProvider());
+    const brain = new BrainManager(vector, ast, new LocalGroundedAnswerProvider());
 
     await ast.init();
     await vector.init();

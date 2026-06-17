@@ -1,4 +1,5 @@
 import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -7,7 +8,7 @@ async function runVectorTest() {
     const testWorkspace = path.join(__dirname, 'test-workspace-vector');
     if (!fs.existsSync(testWorkspace)) fs.mkdirSync(testWorkspace);
 
-    const vectorStore = new VectorStore(testWorkspace);
+    const vectorStore = new VectorStore(testWorkspace, new LocalKeywordEmbeddingProvider());
     await vectorStore.init();
 
     console.log('Adding test chunks...');

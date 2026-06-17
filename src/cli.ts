@@ -1,5 +1,6 @@
 import { ASTManager } from './graph/ASTManager';
 import { VectorStore } from './memory/VectorStore';
+import { LocalKeywordEmbeddingProvider } from './ai/LocalKeywordEmbeddingProvider';
 import * as path from 'path';
 
 async function main() {
@@ -11,8 +12,8 @@ async function main() {
 
     // Initialize with current directory or project root
     const root = process.cwd();
-    const ast = new ASTManager();
-    const vector = new VectorStore(root);
+    const ast = new ASTManager(root);
+    const vector = new VectorStore(root, new LocalKeywordEmbeddingProvider());
 
     try {
         await ast.init();

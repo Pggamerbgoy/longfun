@@ -17,9 +17,8 @@ export class CacheManager {
      * Optimizes context to fit within a specific token budget.
      * Useful for Free Plan users.
      */
-    optimizeContext(chunks: any[], query: string): string {
+    optimizeContext(chunks: any[], query: string, graphContext: string = "", projectMapContext: string = ""): string {
         console.log(`Optimizing context for budget: ${this.budget.maxTokens} tokens...`);
-        
         // 1. Sort chunks by relevance score (already done by vector search)
         // 2. Estimate tokens (rough estimate: 4 chars = 1 token)
         let totalTokens = 0;
@@ -41,15 +40,25 @@ export class CacheManager {
             }
         }
 
+        console.log(`[AI Memory] Tokens used: ${totalTokens}. Budget remaining: ${this.budget.maxTokens - totalTokens}`);
+
         // 3. Construct the optimized prompt
         let prompt = `RELEVANT CODE CONTEXT (Budget-Optimized):\n`;
         prompt += `=========================================\n\n`;
+
+        if (projectMapContext) {
+            prompt += `COMPACT PROJECT MAP:\n${projectMapContext}\n\n`;
+        }
 
         acceptedChunks.forEach((c, i) => {
             prompt += `[File ${i+1}: ${c.filePath}]\n`;
             prompt += `Lines: ${c.lineStart}-${c.lineEnd}\n`;
             prompt += `\`\`\`\n${this.pruneCode(c.content)}\n\`\`\`\n\n`;
         });
+
+        if (graphContext) {
+            prompt += `GRAPH CONTEXT:\n${graphContext}\n\n`;
+        }
 
         return prompt;
     }
@@ -60,7 +69,7 @@ export class CacheManager {
     private pruneCode(code: string): string {
         // Basic pruning: remove large comment blocks to save tokens
         return code
-            .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '') // Remove JS/TS comments
+            .replace(/\/\*[\s\S]*?\*\/|([^:]|^)\/\/.*$/gm, '$1') // Remove JS/TS comments
             .replace(/'''[\s\S]*?'''|"""[\s\S]*?"""|#.*$/gm, '') // Remove Python comments/docstrings
             .split('\n')
             .filter(line => line.trim().length > 0)

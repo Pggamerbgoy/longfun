@@ -1,4 +1,7 @@
 node_modules/
+.npm-cache/
+.transformers-test-cache/
+.ai-memory-test-workspace/
 dist/
 out/
 .vscode-test/

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "ai-memory-os": {
+      "command": "npm",
+      "args": [
+        "--silent",
+        "run",
+        "mcp",
+        "--",
+        "--workspace",
+        "C:\\code\\makima_fixed"
+      ],
+      "cwd": "C:\\Users\\kamit\\.gemini\\antigravity\\scratch\\ai-memory-extension"
+    }
+  }
+}

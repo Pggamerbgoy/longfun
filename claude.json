@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ai-memory": {
+      "command": "node",
+      "args": ["${workspaceFolder}/out/mcp_server.js"],
+      "env": {
+        "WORKSPACE": "${workspaceFolder}"
+      }
+    }
+  }
+}

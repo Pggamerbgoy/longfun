@@ -1,87 +1,63 @@
 import * as vscode from 'vscode';
-import { ASTManager } from '../graph/ASTManager';
-import { VectorStore } from '../memory/VectorStore';
+import { WorkspaceIndexService } from '../indexing/WorkspaceIndexService';
 
 export class ContinuousDiffEngine implements vscode.Disposable {
     private fileSystemWatcher: vscode.FileSystemWatcher | undefined;
-    private astManager: ASTManager;
-    private vectorStore: VectorStore;
-    private debounceTimer: NodeJS.Timeout | null = null;
+    private debounceTimers = new Map<string, NodeJS.Timeout>();
 
-    constructor(astManager: ASTManager, vectorStore: VectorStore) {
-        this.astManager = astManager;
-        this.vectorStore = vectorStore;
-    }
+    constructor(private readonly indexService: WorkspaceIndexService) {}
 
     startWatching() {
         // Watch for all file saves in the workspace
-        this.fileSystemWatcher = vscode.workspace.createFileSystemWatcher('**/*.*');
+        this.fileSystemWatcher = vscode.workspace.createFileSystemWatcher('**/*');
 
+        this.fileSystemWatcher.onDidCreate(async (uri) => {
+            this.handleFileChange(uri);
+        });
         this.fileSystemWatcher.onDidChange(async (uri) => {
             this.handleFileChange(uri);
+        });
+        this.fileSystemWatcher.onDidDelete(async (uri) => {
+            await this.indexService.deleteFile(uri.fsPath);
+            vscode.window.setStatusBarMessage('$(trash) AI Memory: Removed deleted file', 2000);
         });
 
         console.log('ContinuousDiffEngine is watching for file changes.');
     }
 
     private handleFileChange(uri: vscode.Uri) {
-        // Ignore node_modules, build, out directories
-        if (uri.fsPath.includes('node_modules') || uri.fsPath.includes('out') || uri.fsPath.includes('dist')) {
+        const filePath = uri.fsPath;
+        if (!this.indexService.shouldIndexFile(filePath)) {
             return;
         }
 
-        // Debounce to prevent multiple triggers for rapid saves
-        if (this.debounceTimer) {
-            clearTimeout(this.debounceTimer);
+        // Debounce to prevent multiple triggers for rapid saves on the same file
+        if (this.debounceTimers.has(filePath)) {
+            clearTimeout(this.debounceTimers.get(filePath));
         }
 
-        this.debounceTimer = setTimeout(async () => {
+        const timer = setTimeout(async () => {
             try {
-                const document = await vscode.workspace.openTextDocument(uri);
-                const content = document.getText();
-                
-                console.log(`Detected change in ${uri.fsPath}, updating Memory...`);
-                
-                // Update Graph
-                await this.astManager.parseFile(uri.fsPath, content);
-                
-                // Update Vector DB
-                const chunks = this.chunkCode(uri.fsPath, content);
-                await this.vectorStore.upsert(uri.fsPath, chunks);
-                
+                this.debounceTimers.delete(filePath);
+                console.log(`Detected change in ${filePath}, updating Memory...`);
+
+                await this.indexService.indexFile(filePath);
                 vscode.window.setStatusBarMessage('$(sync~spin) AI Memory: Updated context', 2000);
             } catch (err) {
-                console.error(`Error updating memory for ${uri.fsPath}:`, err);
+                console.error(`Error updating memory for ${filePath}:`, err);
             }
         }, 2000); // 2 second debounce
-    }
 
-    private chunkCode(filePath: string, content: string) {
-        const lines = content.split('\n');
-        const chunks: any[] = [];
-        const chunkSize = 50; // lines per chunk
-        
-        for (let i = 0; i < lines.length; i += chunkSize) {
-            const chunkLines = lines.slice(i, i + chunkSize);
-            chunks.push({
-                filePath,
-                content: chunkLines.join('\n'),
-                metadata: {
-                    lineStart: i + 1,
-                    lineEnd: i + chunkLines.length,
-                    type: 'chunk'
-                }
-            });
-        }
-        return chunks;
+        this.debounceTimers.set(filePath, timer);
     }
 
     dispose() {
         if (this.fileSystemWatcher) {
             this.fileSystemWatcher.dispose();
         }
-        if (this.debounceTimer) {
-            clearTimeout(this.debounceTimer);
+        for (const timer of this.debounceTimers.values()) {
+            clearTimeout(timer);
         }
+        this.debounceTimers.clear();
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "ai-memory-os",
   "displayName": "AI Memory OS",
-  "description": "An intelligent AI memory extension for VS Code using AST and Context Caching.",
+  "description": "High-performance local workspace intelligence for VS Code. AST + Vector RAG for token-efficient AI agent integration and semantic code search.",
   "version": "1.0.7",
   "publisher": "NOSTEX",
   "icon": "icon.png",
@@ -11,11 +11,31 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Pggamerbgoy/ai-memory-extension.git"
+    "url": "https://github.com/Pggamerbgoy/longfun.git"
   },
+  "keywords": [
+    "AI",
+    "memory",
+    "workspace-intelligence",
+    "code-analysis",
+    "semantic-search",
+    "ast-parsing",
+    "vector-rag",
+    "mcp",
+    "claude-code",
+    "ai-agents",
+    "context-caching",
+    "dependency-graph",
+    "code-search",
+    "vscode-extension",
+    "project-mapping",
+    "token-efficient",
+    "local-ai"
+  ],
   "categories": [
     "Machine Learning",
-    "Programming Languages"
+    "Programming Languages",
+    "Other"
   ],
   "activationEvents": [
     "*"
